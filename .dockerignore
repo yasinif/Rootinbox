@@ -1,0 +1,52 @@
+# === RootInbox Docker Build Context Filter ===
+# Minimize context size and prevent host artifacts from polluting the build.
+
+# Git
+.git
+.gitignore
+
+# Host-built artifacts (rebuilt inside Docker)
+web/node_modules
+web/dist
+web/dist-ssr
+
+# IDE and editor
+.vscode
+.idea
+*.sw?
+*.suo
+
+# Host database and runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+
+# Windows binary
+*.exe
+
+# Documentation (not needed in image)
+docs/
+*.md
+!web/README.md
+
+# Dev scripts
+run-dev.ps1
+run.bat
+start.bat
+fix-firewall.bat
+
+# Test files (not needed in production image)
+web/tests
+web/vitest.config.ts
+web/.oxlintrc.json
+web/eslint.config.js
+web/config_dump.json
+
+# Agent artifacts
+.agents
+.gemini
+
+# Misc
+*.log

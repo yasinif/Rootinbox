@@ -1,0 +1,149 @@
+#!/usr/bin/env node
+
+/**
+ * scripts/public-readiness
+ *
+ * Verifies that a target repository directory is safe for public release:
+ * 1. Secret Scanning: No private keys, PATs, cloud tokens, or live credentials.
+ * 2. Personal Data Scanning: No personal email addresses, local user workstation paths (C:\Users\), or personalized test fixtures.
+ * 3. License & Compliance: Verifies presence of AGPL-3.0 LICENSE, SECURITY.md, and CONTRIBUTING.md.
+ *
+ * Usage: node scripts/public-readiness [target_dir]
+ */
+
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const targetDir = process.argv[2] ? path.resolve(process.argv[2]) : process.cwd();
+
+console.log(`=======================================================`);
+console.log(`ROOTINBOX PUBLIC READINESS AUDIT RUNNER`);
+console.log(`Target Directory: ${targetDir}`);
+console.log(`=======================================================\n`);
+
+let failed = 0;
+let passed = 0;
+
+function report(status, name, details = '') {
+  if (status) {
+    console.log(`[PASS] ${name}${details ? ` (${details})` : ''}`);
+    passed++;
+  } else {
+    console.error(`[FAIL] ${name}${details ? ` -> ${details}` : ''}`);
+    failed++;
+  }
+}
+
+// 1. Verify Essential Public Documents
+const essentialFiles = [
+  'LICENSE',
+  'README.md',
+  'README-fa.md',
+  'SECURITY.md',
+  'CONTRIBUTING.md',
+  'DEPLOYMENT.md'
+];
+
+for (const f of essentialFiles) {
+  const p = path.join(targetDir, f);
+  if (fs.existsSync(p)) {
+    report(true, `Essential document: ${f}`);
+  } else {
+    report(false, `Essential document: ${f}`, 'File missing');
+  }
+}
+
+// Verify LICENSE content
+const licensePath = path.join(targetDir, 'LICENSE');
+if (fs.existsSync(licensePath)) {
+  const content = fs.readFileSync(licensePath, 'utf8');
+  if (content.includes('GNU AFFERO GENERAL PUBLIC LICENSE') && content.includes('Version 3')) {
+    report(true, 'License validation', 'Confirmed GNU AGPL v3.0 text');
+  } else {
+    report(false, 'License validation', 'Does not match AGPL-3.0');
+  }
+}
+
+// 2. Scan all files for forbidden patterns
+function getAllFiles(dir, fileList = []) {
+  if (!fs.existsSync(dir)) return fileList;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'dist' || entry.name === 'agent-logs' || entry.name === 'send-for-ai' || entry.name === 'scratch' || entry.name === 'ci-local-results' || entry.name === '.arena') {
+      continue;
+    }
+    if (entry.isDirectory()) {
+      getAllFiles(full, fileList);
+    } else if (entry.isFile()) {
+      // Exclude this scanner file from scanning itself
+      if (path.resolve(full) !== path.resolve(__filename) && !entry.name.startsWith('public-readiness')) {
+        fileList.push(full);
+      }
+    }
+  }
+  return fileList;
+}
+
+const files = getAllFiles(targetDir);
+console.log(`\nScanning ${files.length} files across tree for sensitive data...`);
+
+// Forbidden patterns constructed dynamically to avoid self-match
+const forbiddenFixturePattern = new RegExp(['conv', 'yasin', '1'].join('-'));
+const forbiddenChecks = [
+  { name: 'Private Key Headers', regex: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+  { name: 'GitHub Personal Access Token', regex: /ghp_[A-Za-z0-9_]{36}|github_pat_[A-Za-z0-9_]{82}/ },
+  { name: 'AWS Access Key', regex: /AKIA[0-9A-Z]{16}/ },
+  { name: 'Personal Gmail Address', regex: /[a-zA-Z0-9._%+-]+@gmail\.com/i },
+  { name: 'Personal Fixture', regex: forbiddenFixturePattern },
+  { name: 'Windows Absolute Workstation Path', regex: /C:[\\\/]Users[\\\/][a-zA-Z0-9_-]+/i }
+];
+
+// Forbidden files that must never exist in public tree
+const forbiddenFilenames = [
+  'task.md',
+  'UI_UX_SKILL.md'
+];
+
+for (const fn of forbiddenFilenames) {
+  const found = files.find(f => path.basename(f) === fn);
+  if (found) {
+    report(false, `Prohibited file check: ${fn}`, `Found at ${path.relative(targetDir, found)}`);
+  } else {
+    report(true, `Prohibited file check: ${fn}`, 'Clean (not in tree)');
+  }
+}
+
+for (const chk of forbiddenChecks) {
+  const hits = [];
+  for (const file of files) {
+    try {
+      const content = fs.readFileSync(file, 'utf8');
+      if (chk.regex.test(content)) {
+        hits.push(path.relative(targetDir, file));
+      }
+    } catch (e) {
+      // binary file, skip text test
+    }
+  }
+
+  if (hits.length === 0) {
+    report(true, `Secret/Privacy scan: ${chk.name}`);
+  } else {
+    report(false, `Secret/Privacy scan: ${chk.name}`, `Hits found in: ${hits.slice(0, 3).join(', ')}`);
+  }
+}
+
+console.log(`\n=======================================================`);
+console.log(`AUDIT SUMMARY: ${passed} Checks Passed | ${failed} Checks Failed`);
+if (failed === 0) {
+  console.log(`OVERALL STATUS: PASS (Repository tree is verified public-ready)`);
+  console.log(`=======================================================\n`);
+  process.exit(0);
+} else {
+  console.error(`OVERALL STATUS: FAIL (Resolve violations before making public)`);
+  console.log(`=======================================================\n`);
+  process.exit(1);
+}

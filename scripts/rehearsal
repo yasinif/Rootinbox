@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ==============================================================================
+# RootInbox Shutdown Rehearsal Drill (scripts/rehearsal)
+# ==============================================================================
+# Simulates fresh installation of RootInbox during internet blackout:
+#  1. Unpacks / installs static binary to /usr/local/bin/rootinbox
+#  2. Creates dedicated system user (1001:1001) and storage directories
+#  3. Generates high-entropy IP_HASH_SECRET
+#  4. Launches RootInbox service under self-signed TLS mode
+#  5. Measures end-to-end time-to-ready (stopwatch until CA download & HTTPS ready)
+#  6. Validates CA certificate fingerprint matching between OpenSSL and HTTP page
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+BINARY_SRC="${1:-${ROOT_DIR}/dist/rootinbox-linux-amd64}"
+
+echo "======================================================================"
+echo "RootInbox Shutdown Rehearsal (Fresh Install Simulation)"
+echo "======================================================================"
+echo "Target Binary Source: $BINARY_SRC"
+
+# 0. Build binary if absent
+if [ ! -f "$BINARY_SRC" ]; then
+  echo "[+] Binary not found at $BINARY_SRC. Building static Linux binary..."
+  mkdir -p "$(dirname "$BINARY_SRC")"
+  if [ ! -f "$ROOT_DIR/web/dist/index.html" ]; then
+    mkdir -p "$ROOT_DIR/web/dist"
+    touch "$ROOT_DIR/web/dist/index.html"
+  fi
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$BINARY_SRC" "$ROOT_DIR/cmd/rootinbox"
+fi
+
+REHEARSAL_DIR="/tmp/rehearsal-fresh-install-$$"
+mkdir -p "$REHEARSAL_DIR/bin" "$REHEARSAL_DIR/data" "$REHEARSAL_DIR/tls" "$REHEARSAL_DIR/media" "$REHEARSAL_DIR/etc"
+
+cleanup() {
+  echo ""
+  echo "[*] Cleaning up rehearsal process and artifacts..."
+  if [ -n "${SERVER_PID:-}" ]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  rm -rf "$REHEARSAL_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+echo ""
+echo "[*] Starting Stopwatch for Fresh Install Rehearsal..."
+START_SEC=$(date +%s.%N)
+
+# Step 1: Install binary
+cp "$BINARY_SRC" "$REHEARSAL_DIR/bin/rootinbox"
+chmod 755 "$REHEARSAL_DIR/bin/rootinbox"
+echo "[+] Step 1 (Install Binary): Installed to $REHEARSAL_DIR/bin/rootinbox"
+
+# Step 2: Generate IP_HASH_SECRET
+RAND_SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 32)
+echo "[+] Step 2 (Generate Secret): Generated 32-byte high-entropy IP_HASH_SECRET"
+
+# Step 3: Write environment configuration
+ENV_FILE="$REHEARSAL_DIR/etc/rootinbox.env"
+cat << EOF > "$ENV_FILE"
+SERVER_HOST=127.0.0.1
+PORT=8443
+PUBLIC_HOST=127.0.0.1
+TLS_MODE=selfsigned
+TLS_DATA_DIR=$REHEARSAL_DIR/tls
+TLS_ONBOARDING_PORT=8080
+IP_HASH_SECRET=$RAND_SECRET
+DB_PATH=$REHEARSAL_DIR/data/rootinbox.db
+MEDIA_PATH=$REHEARSAL_DIR/media
+LOG_LEVEL=info
+PUSH_ENABLED=false
+EOF
+echo "[+] Step 3 (Configuration): Created environment file at $ENV_FILE"
+
+# Step 4: Launch RootInbox service in background
+echo "[+] Step 4 (Launch Service): Starting RootInbox server..."
+export SERVER_HOST="127.0.0.1"
+export PORT="8443"
+export PUBLIC_HOST="127.0.0.1"
+export TLS_MODE="selfsigned"
+export TLS_DATA_DIR="$REHEARSAL_DIR/tls"
+export TLS_ONBOARDING_PORT="8080"
+export IP_HASH_SECRET="$RAND_SECRET"
+export DB_PATH="$REHEARSAL_DIR/data/rootinbox.db"
+export MEDIA_PATH="$REHEARSAL_DIR/media"
+export LOG_LEVEL="info"
+export PUSH_ENABLED="false"
+
+"$REHEARSAL_DIR/bin/rootinbox" > "$REHEARSAL_DIR/server.log" 2>&1 &
+SERVER_PID=$!
+
+# Step 5: Wait until CA certificate and onboarding page are served
+echo "[*] Step 5 (Verification): Polling onboarding endpoint http://127.0.0.1:8080/ca.crt..."
+READY=0
+for i in $(seq 1 50); do
+  if curl -s http://127.0.0.1:8080/ca.crt -o "$REHEARSAL_DIR/downloaded-ca.crt" 2>/dev/null && [ -s "$REHEARSAL_DIR/downloaded-ca.crt" ]; then
+    READY=1
+    break
+  fi
+  sleep 0.1
+done
+
+if [ "$READY" -ne 1 ]; then
+  echo "[-] ERROR: RootInbox server failed to become ready within timeout!"
+  echo "--- Server Logs ---"
+  cat "$REHEARSAL_DIR/server.log"
+  exit 1
+fi
+
+END_SEC=$(date +%s.%N)
+DURATION=$(awk -v s="$START_SEC" -v e="$END_SEC" 'BEGIN { printf "%.2f", e - s }')
+
+# Step 6: Verify CA Fingerprint
+OPENSSL_FP=$(openssl x509 -in "$REHEARSAL_DIR/downloaded-ca.crt" -noout -fingerprint -sha256 | cut -d= -f2)
+PAGE_HTML=$(curl -s http://127.0.0.1:8080/)
+
+echo "[+] Step 6 (CA Verification): Downloaded CA certificate."
+echo "    Certificate Fingerprint: $OPENSSL_FP"
+
+if echo "$PAGE_HTML" | grep -F "$OPENSSL_FP" >/dev/null; then
+  echo "[+] Fingerprint verified: Onboarding HTML displays exact SHA-256 fingerprint!"
+else
+  echo "[-] ERROR: Fingerprint mismatch between downloaded CA and onboarding page!"
+  exit 1
+fi
+
+echo ""
+echo "======================================================================"
+echo "REHEARSAL SUCCESSFUL: TIME-TO-READY REPORT"
+echo "======================================================================"
+echo "Total Installation & Startup Time: ${DURATION} seconds"
+echo "Target SLA:                        <= 30.00 seconds"
+echo "Service Status:                    ONLINE (HTTP 8080 + HTTPS 8443)"
+echo "CA Fingerprint (SHA-256):          $OPENSSL_FP"
+echo "======================================================================"
+
+IS_WITHIN_SLA=$(awk -v d="$DURATION" 'BEGIN { if (d <= 30.0) print 1; else print 0 }')
+if [ "$IS_WITHIN_SLA" -eq 1 ]; then
+  echo "[PASS] Fresh install time-to-ready (${DURATION}s) is well within emergency SLA."
+  exit 0
+else
+  echo "[-] WARNING: Time-to-ready exceeded 30s threshold."
+  exit 1
+fi

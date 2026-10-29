@@ -1,0 +1,454 @@
+# RootInbox Offline Bundle Generator for PowerShell (Windows/Cross-platform)
+$ErrorActionPreference = "Stop"
+
+$rootDir = Split-Path -Parent $PSScriptRoot
+$distDir = Join-Path $rootDir "dist"
+
+if (-not (Test-Path $distDir)) {
+    New-Item -ItemType Directory -Path $distDir | Out-Null
+}
+
+$version = git -C $rootDir describe --tags --always 2>$null
+if (-not $version) { $version = "1.0.0" }
+$buildHash = git -C $rootDir rev-parse --short HEAD 2>$null
+if (-not $buildHash) { $buildHash = "unknown" }
+$buildTime = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+Write-Host "=================================================="
+Write-Host "Building RootInbox Offline Release Bundle"
+Write-Host "Version:    $version"
+Write-Host "Commit:     $buildHash"
+Write-Host "Build Time: $buildTime"
+Write-Host "Target Dir: $distDir"
+Write-Host "=================================================="
+
+# 1. Build frontend if needed
+$indexPath = Join-Path $rootDir "web/dist/index.html"
+if (-not (Test-Path $indexPath)) {
+    Write-Host "[+] Building frontend web application..."
+    Push-Location (Join-Path $rootDir "web")
+    npm run build
+    Pop-Location
+} else {
+    Write-Host "[+] Embedded web application already present in web/dist"
+}
+
+# 2. Build Linux amd64 static binary
+Write-Host "[+] Compiling static binary for linux/amd64 (CGO_ENABLED=0)..."
+$env:CGO_ENABLED = "0"
+$env:GOOS = "linux"
+$env:GOARCH = "amd64"
+go build -ldflags="-s -w -X rootinbox/cmd/rootinbox/main.version=$version -X rootinbox/cmd/rootinbox/main.buildHash=$buildHash -X rootinbox/cmd/rootinbox/main.buildTime=$buildTime" -o (Join-Path $distDir "rootinbox-linux-amd64") "$rootDir/cmd/rootinbox"
+
+# 3. Build Linux arm64 static binary
+Write-Host "[+] Compiling static binary for linux/arm64 (CGO_ENABLED=0)..."
+$env:CGO_ENABLED = "0"
+$env:GOOS = "linux"
+$env:GOARCH = "arm64"
+go build -ldflags="-s -w -X rootinbox/cmd/rootinbox/main.version=$version -X rootinbox/cmd/rootinbox/main.buildHash=$buildHash -X rootinbox/cmd/rootinbox/main.buildTime=$buildTime" -o (Join-Path $distDir "rootinbox-linux-arm64") "$rootDir/cmd/rootinbox"
+
+# Reset env vars
+Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
+Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue
+
+# 4. Generate systemd unit
+$serviceContent = @"
+[Unit]
+Description=RootInbox Private Messenger Server
+After=network.target
+
+[Service]
+Type=simple
+User=rootinbox
+Group=rootinbox
+WorkingDirectory=/var/lib/rootinbox
+EnvironmentFile=/etc/rootinbox/rootinbox.env
+ExecStart=/usr/local/bin/rootinbox
+Restart=always
+RestartSec=5s
+LimitNOFILE=65535
+
+# Hardening
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+"@
+Set-Content -Path (Join-Path $distDir "rootinbox.service") -Value $serviceContent -Encoding utf8
+
+# 5. Generate sample env
+$envSampleContent = @"
+# ==============================================================================
+# RootInbox Environment Configuration (Stage 2 IP-Only Deploy)
+# ==============================================================================
+
+# Server Network Settings
+SERVER_HOST=0.0.0.0
+PORT=8443
+
+# TLS Configuration
+# Modes: "off" (plain HTTP), "selfsigned" (automatic private CA), "files" (custom cert/key)
+TLS_MODE=selfsigned
+# The public IP address or hostname of your VPS (REQUIRED for selfsigned mode)
+PUBLIC_HOST=YOUR_SERVER_IP
+# Data directory where CA and certificates are persisted (MUST be persistent)
+TLS_DATA_DIR=/var/lib/rootinbox/tls
+# Plain HTTP port for serving /ca.crt and mobile onboarding guide
+TLS_ONBOARDING_PORT=8080
+
+# Application Secret: Must be at least 32 bytes (64 hex characters or random string)
+# The server refuses to start with any value containing CHANGE_THIS.
+IP_HASH_SECRET=CHANGE_THIS_GENERATE_WITH_OPENSSL_RAND_HEX_32
+
+# Database & Media Paths
+DB_PATH=/var/lib/rootinbox/data/rootinbox.db
+MEDIA_PATH=/var/lib/rootinbox/data/media
+
+# Logging
+LOG_LEVEL=info
+
+# Push Notifications (Disabled by default for self-contained IP deploy)
+PUSH_ENABLED=false
+# PUSH_VAPID_ENCRYPTION_KEY=
+# PUSH_VAPID_SUBJECT=mailto:admin@example.com
+
+# Insecure Dev Mode (Set to false for production IP deployment)
+INSECURE_DEV_MODE=false
+"@
+Set-Content -Path (Join-Path $distDir "rootinbox.env.sample") -Value $envSampleContent -Encoding utf8
+
+# 6. Generate Docker Compose
+$dockerComposeContent = @"
+version: '3.8'
+
+services:
+  rootinbox:
+    image: alpine:latest
+    container_name: rootinbox
+    restart: unless-stopped
+    command: /usr/local/bin/rootinbox
+    # Option A: Standard bridged ports
+    ports:
+      - "8443:8443"
+      - "8080:8080"
+      - "3478:3478/udp" # STUN/TURN UDP for audio/video calls
+    # Option B: Host networking (uncomment below and comment out 'ports:' for direct UDP performance)
+    # network_mode: "host"
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - PORT=8443
+      - TLS_MODE=selfsigned
+      - PUBLIC_HOST=YOUR_SERVER_IP
+      - TLS_DATA_DIR=/data/tls
+      - TLS_ONBOARDING_PORT=8080
+      - IP_HASH_SECRET=CHANGE_THIS_GENERATE_WITH_OPENSSL_RAND_HEX_32
+      - DB_PATH=/data/rootinbox.db
+      - MEDIA_PATH=/data/media
+      - PUSH_ENABLED=false
+      - INSECURE_DEV_MODE=false
+      - LOG_LEVEL=info
+      # STUN/TURN configuration for WebRTC calls
+      # - TURN_ENABLED=true
+      # - TURN_LISTEN_ADDR=0.0.0.0:3478
+      # - TURN_ACTIVE_SECRET=CHANGE_THIS_TO_A_RANDOM_32_BYTES_SECRET_KEY_123456
+    volumes:
+      - ./rootinbox-linux-amd64:/usr/local/bin/rootinbox:ro
+      - rootinbox_data:/data
+
+  # Optional Caddy reverse-proxy service for domain deployments with automatic Let's Encrypt TLS
+  # Usage: Uncomment below, set TLS_MODE=off on rootinbox, and specify your DOMAIN
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: rootinbox_caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   environment:
+  #     - DOMAIN=chat.example.com
+  #   command: caddy reverse-proxy --from https://`$${DOMAIN} --to rootinbox:8443
+  #   depends_on:
+  #     - rootinbox
+  #   volumes:
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+
+volumes:
+  rootinbox_data:
+  # caddy_data:
+  # caddy_config:
+"@
+Set-Content -Path (Join-Path $distDir "docker-compose.yml") -Value $dockerComposeContent -Encoding utf8
+
+# 7. Generate Comprehensive Persian Deployment Guide
+$readmeFaContent = @"
+# راهنمای جامع استقرار پیام‌رسان RootInbox (بسته تک‌باینری مستقل با TLS خودکار)
+
+این بسته نرم‌افزاری شامل فایل باینری کامپایل‌شده استاتیک بدون نیاز به هیچ‌گونه وابستگی خارجی (بدون نیاز به پایتون، نود، داکر، پایگاه‌داده خارجی یا پروکسی معکوس) است. فرانت‌اند وب و دیتابیس به صورت کامل درون فایل اجرایی گنجانده شده‌اند و پیام‌رسان حتی روی سرورهای مجازی با آدرس IP خام (بدون دامنه اینترنتی) به همراه گواهی امنیتی خودکار (Private CA) اجرا می‌شود.
+
+---
+
+## ۱. محتویات بسته استقرار (`dist/`)
+
+| نام فایل | کاربرد |
+|---|---|
+| `rootinbox-linux-amd64` | فایل باینری استاتیک لینوکس برای معماری x86_64 (اینتل / AMD). |
+| `rootinbox-linux-arm64` | فایل باینری استاتیک لینوکس برای معماری ARM64 (رزبری‌پای و سرورهای ابری ARM). |
+| `rootinbox.service` | فایل پیکربندی سرویس خودکار سیستم‌عامل لینوکس (Systemd). |
+| `rootinbox.env.sample` | نمونه فایل پیکربندی متغیرهای محیطی. |
+| `docker-compose.yml` | فایل پیکربندی جهت اجرای جایگزین با داکر کامپوز (شامل سرویس اختیاری Caddy). |
+| `SHA256SUMS` | چک‌سام‌های امنیتی SHA-256 جهت اعتبارسنجی یکپارچگی فایل‌ها. |
+
+---
+
+## ۲. راهنمای گام‌به‌گام استقرار مستقیم (پیشنهادی با Systemd)
+
+### گام ۱: تهیه سرور مجازی خام (Buy a VPS)
+1. از یکی از ارائه‌دهندگان معتبر ابری یک سرور مجازی لینوکس تهیه فرمایید (مشخصات پیشنهادی: ۱ هسته پردازنده، ۱ گیگابایت رم، ۱۰ گیگابایت حافظه SSD).
+2. سیستم‌عامل سرور را **Ubuntu 22.04 LTS** یا **Ubuntu 24.04 LTS** (یا Debian 12) انتخاب کنید.
+3. پس از تحویل سرور، آدرس IP عمومی (Public IP) سرور و رمز عبور یا کلید SSH را یادداشت نمایید.
+
+### گام ۲: اتصال اولیه به سرور با SSH (SSH In)
+در ترمینال سیستم خود (یا PowerShell در ویندوز) دستور زیر را وارد کنید:
+```bash
+ssh root@YOUR_SERVER_IP
+```
+در صورتی که اولین بار است متصل می‌شوید، عبارت `yes` را تایپ نموده و کلید اینتر را فشار دهید.
+
+### گام ۳: کپی فایل‌های بسته به سرور (Copy the binary)
+در سیستم محلی خود، فایل‌های باینری و تنظیمی را از پوشه `dist` به سرور منتقل کنید:
+```bash
+# برای سرورهای اینتل/ای‌ام‌دی (معماری رایج):
+scp rootinbox-linux-amd64 rootinbox.service rootinbox.env.sample root@YOUR_SERVER_IP:/tmp/
+
+# برای سرورهای ARM:
+# scp rootinbox-linux-arm64 rootinbox.service rootinbox.env.sample root@YOUR_SERVER_IP:/tmp/
+```
+
+### گام ۴: ایجاد کاربر سیستمی و نصب فایل‌ها (Create the service)
+روی سرور لینوکس، دستورات زیر را به ترتیب اجرا نمایید:
+```bash
+# ۱. ایجاد کاربر سیستمی مجزا بدون دسترسی ورود
+sudo useradd --system --shell /usr/sbin/nologin --user-group rootinbox || true
+
+# ۲. انتقال و نصب باینری با مجوز اجرایی مناسب
+sudo install -m 755 /tmp/rootinbox-linux-amd64 /usr/local/bin/rootinbox
+
+# ۳. ساخت پوشه‌های اختصاصی داده، رسانه، تنظیمات و کلیدهای TLS
+sudo mkdir -p /var/lib/rootinbox/data /var/lib/rootinbox/tls /etc/rootinbox
+sudo chown -R rootinbox:rootinbox /var/lib/rootinbox
+sudo chmod 700 /var/lib/rootinbox/tls
+
+# ۴. ساخت فایل تنظیمات محیطی از روی نمونه
+sudo cp /tmp/rootinbox.env.sample /etc/rootinbox/rootinbox.env
+sudo chown rootinbox:rootinbox /etc/rootinbox/rootinbox.env
+sudo chmod 600 /etc/rootinbox/rootinbox.env
+```
+
+فایل تنظیمات را ویرایش کنید:
+```bash
+sudo nano /etc/rootinbox/rootinbox.env
+```
+مقادیر زیر را به دقت تنظیم نمایید:
+- `PUBLIC_HOST=YOUR_SERVER_IP`: دقیقاً برابر با آی‌پی عمومی سرور شما (مثلاً `198.51.100.25`).
+- `PORT=8443`: پورت امن HTTPS پیام‌رسان.
+- `TLS_MODE=selfsigned`: فعال‌سازی تولید خودکار گواهی اختصاصی.
+- `TLS_ONBOARDING_PORT=8080`: پورت ساده HTTP برای صفحه راهنما و دانلود گواهی ریشه.
+- `IP_HASH_SECRET`: **الزامی و حیاتی.** سرور از پذیرش مقادیر پیش‌فرض یا دارای عبارت `CHANGE_THIS` اکیداً خودداری می‌کند و استارت نخواهد شد. برای تولید یک کلید تصادفی امن ۳۲ بایتی، دستور زیر را اجرا کنید:
+  ```bash
+  RANDOM_SECRET=`$(openssl rand -hex 32)
+  sudo sed -i "s/CHANGE_THIS_GENERATE_WITH_OPENSSL_RAND_HEX_32/`$RANDOM_SECRET/" /etc/rootinbox/rootinbox.env
+  ```
+
+### گام ۵: باز کردن پورت‌ها در فایروال سرور (Open the ports)
+پورت‌های مورد نیاز پیام‌رسان را در فایروال لینوکس (UFW) باز نمایید:
+```bash
+# پورت HTTPS سرور پیام‌رسان
+sudo ufw allow 8443/tcp comment 'RootInbox HTTPS Messenger'
+
+# پورت HTTP ساده جهت دانلود فایل گواهی و آنبوردینگ گوشی‌ها
+sudo ufw allow 8080/tcp comment 'RootInbox Plain HTTP CA Onboarding'
+
+# پورت UDP 3478 جهت برقراری تماس‌های صوتی و تصویری (STUN/TURN)
+sudo ufw allow 3478/udp comment 'RootInbox STUN/TURN Calls'
+
+# فعال‌سازی فایروال
+sudo ufw enable
+sudo ufw reload
+```
+
+### گام ۶: ایجاد اولین مدیر سیستم (First Admin Creation)
+برای فعال‌سازی دسترسی مدیریتی و ایجاد توکن احراز هویت ادمین:
+```bash
+# ۱. تولید یک توکن محرمانه تصادفی
+ADMIN_TOKEN=`$(openssl rand -hex 32)
+echo "Your Admin Token: `$ADMIN_TOKEN"
+
+# ۲. محاسبه هش امنیتی SHA-256 توکن
+ADMIN_HASH=`$(printf '%s' "`$ADMIN_TOKEN" | sha256sum | awk '{print `$1}')
+echo "Admin Token Hash: `$ADMIN_HASH"
+```
+سپس مقادیر زیر را به فایل `/etc/rootinbox/rootinbox.env` اضافه کنید:
+```ini
+ADMIN_ENABLED=true
+ADMIN_TOKEN_HASH=مقدار_هش_محاسبه_شده_در_بالا
+```
+اکنون درخواست‌های مدیریتی با ارسال هدر `Authorization: Bearer <ADMIN_TOKEN>` مجاز خواهند بود.
+
+### گام ۷: ثبت و راه‌اندازی سرویس Systemd
+```bash
+sudo cp /tmp/rootinbox.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rootinbox
+```
+
+### گام ۸: بررسی صحت کارکرد و اثر انگشت گواهی (CA Fingerprint Verification)
+برای اطمینان از عملکرد بدون نقص سیستم و اعتبارسنجی امنیتی:
+1. مشاهده اثر انگشت امنیتی گواهی اختصاصی (CA SHA-256 Fingerprint):
+   ```bash
+   rootinbox -ca-fingerprint
+   # یا دستور استاندارد OpenSSL:
+   openssl x509 -in /var/lib/rootinbox/tls/ca.crt -noout -fingerprint -sha256
+   ```
+   **اقدام امنیتی ضروری:** مدیر سرور باید مقدار این اثر انگشت را از طریق یک کانال مجزا (مانند تماس صوتی تلفنی) برای کاربران بخواند تا قبل از نصب گواهی، از تطابق آن با مقدار موجود در صفحه آنبوردینگ اطمینان حاصل کنند.
+
+2. بررسی وضعیت اجرای سرویس:
+   ```bash
+   sudo systemctl status rootinbox
+   ```
+   (باید در وضعیت سبز `active (running)` باشد).
+
+3. بررسی لاگ‌های استارت و اثر انگشت:
+   ```bash
+   sudo journalctl -u rootinbox -n 40 --no-pager
+   ```
+   (پیام‌های حاوی `TLS CA fingerprint ready` و `https server starting` مشاهده می‌شود).
+
+4. تست محلی دریافت گواهی امنیتی:
+   ```bash
+   curl -I http://127.0.0.1:8080/ca.crt
+   ```
+   (پاسخ `HTTP/1.1 200 OK` با `Content-Type: application/x-x509-ca-cert`).
+
+5. تست آمادگی سرور امن:
+   ```bash
+   curl -k https://127.0.0.1:8443/health/ready
+   ```
+   (پاسخ حاوی `{"status":"ready"}`).
+
+### امنیت چرخه حیات گواهی و تغییر آدرس سرور (CA Lifecycle & New IP)
+- **محدودیت نام (Name Constraints):** گواهی ریشه اختصاصی تولیدشده صرفاً برای آدرس آی‌پی یا دامنه تنظیم‌شده در `PUBLIC_HOST` معتبر است. در زمان استارت، سرور اعتبارسنجی می‌کند که گواهی موجود حتماً این آدرس را پوشش دهد؛ در غیر این صورت، سرور از شروع به کار خودداری کرده و هشدار می‌دهد که گواهی باید تجدید شود.
+- **جلوگیری از بازتولید ناخواسته گواهی:** در صورتی که فایل‌های `ca.crt` یا `ca.key` وجود داشته باشند اما خوانده نشوند، سرور به هیچ وجه گواهی جدید تولید نخواهد کرد (زیرا باعث قطعی تمام کاربران قبلی می‌شود) مگر آنکه متغیر `TLS_REGENERATE_CA=true` در فایل تنظیمات درج گردد.
+- **تغییر آدرس سرور (New IP):** در صورتی که سرور به IP جدیدی منتقل گردد، باید گواهی جدید ایجاد شده (`TLS_REGENERATE_CA=true`) و مجدداً روی گوشی تمام کاربران نصب شود. در معماری فعلی، داده‌های IndexedDB نیز به آدرس منشأ وابسته‌اند (بعد از پیاده‌سازی فاز ۲، داده‌های کاربر مستقل از منشأ خواهند شد، اما در حال حاضر وابسته به آدرس سرور هستند).
+
+---
+
+## ۳. فرآیند به‌روزرسانی نرم‌افزار به نسخه جدید (Update Procedure)
+
+برای ارتقای سرور به نسخه جدید بدون از دست رفتن داده‌ها:
+1. فایل باینری جدید (`rootinbox-linux-amd64`) را به مسیر `/tmp/rootinbox-new` روی سرور منتقل کنید.
+2. سرویس را متوقف نمایید:
+   ```bash
+   sudo systemctl stop rootinbox
+   ```
+3. از نسخه فعلی باینری فایل پشتیبان تهیه کنید:
+   ```bash
+   sudo cp /usr/local/bin/rootinbox /usr/local/bin/rootinbox.bak
+   ```
+4. باینری جدید را جایگزین نمایید:
+   ```bash
+   sudo install -m 755 /tmp/rootinbox-new /usr/local/bin/rootinbox
+   ```
+5. سرویس را مجدداً استارت کنید:
+   ```bash
+   sudo systemctl start rootinbox
+   sudo systemctl status rootinbox
+   ```
+تمامی تنظیمات، گفتگوها، پیام‌ها و گواهی‌های قبلی دست‌نخورده باقی خواهند ماند.
+
+---
+
+## ۴. تهیه نسخه پشتیبان و بازیابی اطلاعات (Backup & Restore)
+
+تمام داده‌های سرور شامل پایگاه‌داده SQLite، پیام‌ها، رسانه‌ها و کلیدهای CA در مسیر `/var/lib/rootinbox` قرار دارند.
+
+### تهیه پشتیبان (Backup):
+```bash
+# ایجاد آرشیو فشرده با ذکر تاریخ
+sudo tar -czvf /root/rootinbox-backup-`$(date +%F).tar.gz -C /var/lib/rootinbox data tls
+```
+
+### بازیابی اطلاعات (Restore):
+```bash
+# ۱. متوقف ساختن سرویس
+sudo systemctl stop rootinbox
+
+# ۲. استخراج نسخه پشتیبان در مسیر داده‌ها
+sudo tar -xzvf /root/rootinbox-backup-YYYY-MM-DD.tar.gz -C /var/lib/rootinbox
+
+# ۳. تنظیم مجدد مالکیت و دسترسی‌های امنیتی
+sudo chown -R rootinbox:rootinbox /var/lib/rootinbox
+sudo chmod 700 /var/lib/rootinbox/tls
+
+# ۴. راه‌اندازی مجدد سرویس
+sudo systemctl start rootinbox
+```
+
+---
+
+## ۵. روش دوم: اجرا با Docker Compose (مسیر جایگزین)
+
+در صورتی که تمایل به اجرای پیام‌رسان با داکر دارید:
+1. فایل `docker-compose.yml` را ویرایش کرده و آی‌پی سرور را در `PUBLIC_HOST` قرار دهید.
+2. برای بهینه‌سازی تماس‌های صوتی/تصویری UDP بدون سربار NAT، می‌توانید خط `network_mode: "host"` را از حالت کامنت خارج فرمایید.
+3. در صورتی که دارای دامنه اختصاصی هستید، می‌توانید بخش سرویس `caddy` را فعال کنید تا گواهی رسمی رایگان Let's Encrypt به صورت خودکار دریافت شود.
+4. با دستور زیر سرویس را اجرا نمایید:
+   ```bash
+   docker compose up -d
+   ```
+
+---
+
+## ۶. فعال‌سازی و آنبوردینگ روی گوشی‌های کاربران (Android و iOS)
+
+### گوشی‌های اندروید (Android):
+1. در مرورگر گوشی آدرس `http://YOUR_SERVER_IP:8080/` را باز کنید.
+2. روی دکمه «دانلود فایل گواهی امنیتی» بزنید تا فایل `rootinbox-ca.crt` ذخیره شود.
+3. وارد تنظیمات گوشی شوید:
+   `Settings > Security & Privacy > More security settings > Install a certificate > CA certificate`
+4. فایل دانلودشده را انتخاب کرده و پیام هشدار سیستم‌عامل را تأیید کنید.
+
+### گوشی‌های آیفون (iOS):
+1. مرورگر **Safari** را باز کرده و آدرس `http://YOUR_SERVER_IP:8080/` را وارد نمایید.
+2. دکمه دانلود گواهی را بزنید و در اعلان مرورگر گزینه **Allow** را لمس کنید.
+3. به **Settings** آیفون بروید؛ در بالای صفحه گزینه **Profile Downloaded** ظاهر می‌شود. آن را باز کرده و دکمه **Install** را لمس کنید.
+4. **مرحله حیاتی (Full Trust):** به مسیر زیر بروید:
+   `Settings > General > About > Certificate Trust Settings`
+   سوئیچ مربوط به **RootInbox Private CA** را روشن (سبز) نمایید.
+
+### ورود به پیام‌رسان:
+اکنون آدرس امن `https://YOUR_SERVER_IP:8443/` را در مرورگر هر دو گوشی باز کنید. صفحه با قفل امن HTTPS و بدون هیچ خطایی لود شده و دسترسی کامل به قابلیت‌های امنیتی E2EE، ضبط صدا، ارسال تصویر و سرویس‌ورکر فراهم است.
+"@
+Set-Content -Path (Join-Path $distDir "README-fa.md") -Value $readmeFaContent -Encoding utf8
+
+
+# 8. Compute SHA-256 checksums
+Write-Host "[+] Generating SHA256SUMS..."
+$filesToHash = @("rootinbox-linux-amd64", "rootinbox-linux-arm64", "rootinbox.service", "rootinbox.env.sample", "docker-compose.yml", "README-fa.md")
+$lines = @()
+foreach ($file in $filesToHash) {
+    $fullPath = Join-Path $distDir $file
+    if (Test-Path $fullPath) {
+        $hash = (Get-FileHash -Path $fullPath -Algorithm SHA256).Hash.ToLower()
+        $lines += "$hash  $file"
+    }
+}
+Set-Content -Path (Join-Path $distDir "SHA256SUMS") -Value $lines -Encoding ascii
+
+Write-Host "=================================================="
+Write-Host "Offline release bundle created successfully in $distDir"
+Get-Content (Join-Path $distDir "SHA256SUMS")
+Write-Host "=================================================="

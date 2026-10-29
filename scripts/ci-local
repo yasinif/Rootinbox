@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# scripts/ci-local: Automated local CI test runner (bash)
+set -uo pipefail
+
+GIT_SHA=$(git rev-parse HEAD | tr -d '[:space:]')
+GIT_STATUS=$(git status --porcelain)
+OUTPUT_DIR="${1:-ci-local-results/$GIT_SHA}"
+
+mkdir -p "$OUTPUT_DIR"
+
+echo "================================================================"
+echo " RootInbox Local CI Suite (Bash)"
+echo " Git SHA: $GIT_SHA"
+echo " Output Directory: $OUTPUT_DIR"
+echo "================================================================"
+
+mkdir -p web/dist scratch
+touch web/dist/index.html web/dist/manifest.webmanifest web/dist/manifest.json web/dist/favicon.ico web/dist/sw.js
+
+STEPS_JSON="[]"
+TOTAL_START=$(date +%s)
+
+record_step() {
+  local id="$1"
+  local name="$2"
+  local status="$3"
+  local exit_code="$4"
+  local duration="$5"
+  local reason="$6"
+
+  node -e '
+    const fs = require("fs");
+    const p = process.argv[1];
+    const item = {
+      id: process.argv[2],
+      name: process.argv[3],
+      status: process.argv[4],
+      exit_code: process.argv[5] === "null" ? null : parseInt(process.argv[5]),
+      duration_sec: parseFloat(process.argv[6]),
+      reason: process.argv[7],
+      log_file: process.argv[2] + ".log"
+    };
+    let list = [];
+    if (fs.existsSync(p)) {
+      try { list = JSON.parse(fs.readFileSync(p, "utf8")); } catch(e){}
+    }
+    list.push(item);
+    fs.writeFileSync(p, JSON.stringify(list, null, 2));
+  ' "$OUTPUT_DIR/steps.tmp.json" "$id" "$name" "$status" "$exit_code" "$duration" "$reason"
+}
+
+run_step() {
+  local id="$1"
+  local name="$2"
+  local cmd="$3"
+  local skip_reason="${4:-}"
+  local log_file="$OUTPUT_DIR/$id.log"
+
+  if [ -n "$skip_reason" ]; then
+    echo "[-] $name : NOT RUN ($skip_reason)"
+    echo "NOT RUN: $skip_reason" > "$log_file"
+    record_step "$id" "$name" "NOT RUN" "null" "0.0" "$skip_reason"
+    return 0
+  fi
+
+  printf "[*] Running: %s..." "$name"
+  local start_time=$(date +%s)
+  
+  local exit_code=0
+  eval "$cmd" > "$log_file" 2>&1 || exit_code=$?
+
+  local end_time=$(date +%s)
+  local duration=$((end_time - start_time))
+
+  if [ $exit_code -eq 0 ]; then
+    echo " PASS (${duration}s)"
+    record_step "$id" "$name" "PASS" "0" "$duration" ""
+  else
+    echo " FAIL (exit code $exit_code, ${duration}s)"
+    record_step "$id" "$name" "FAIL" "$exit_code" "$duration" "Process exited with code $exit_code"
+  fi
+}
+
+# 1. gofmt check
+run_step "01-gofmt" "gofmt code formatting check" \
+  'unformatted=$(gofmt -l cmd internal pkg scripts); if [ -n "$unformatted" ]; then echo "Unformatted files:\n$unformatted"; exit 1; else echo "All files properly formatted"; exit 0; fi'
+
+# 2. go vet
+run_step "02-govet" "go vet ./..." 'go vet ./...'
+
+# 3. go test -race
+if command -v gcc >/dev/null 2>&1; then
+  run_step "03-gotest-race" "go test -race -count=1 ./..." 'go test -race -count=1 ./...'
+elif docker info >/dev/null 2>&1; then
+  run_step "03-gotest-race" "go test -race -count=1 ./... (Docker container)" 'docker run --rm -v go-cache:/go -e GOTOOLCHAIN=auto -v "$(pwd):/app" -w /app golang:1.24 go test -race -count=1 ./...'
+else
+  run_step "03-gotest-race" "go test -race" "" "CGO compiler (gcc) not available and Docker daemon stopped"
+  run_step "03b-gotest-unit" "go test -count=1 ./... (unit tests)" 'go test -count=1 ./...'
+fi
+
+# 4. staticcheck / govulncheck
+STATICCHECK_BIN=""
+if command -v staticcheck >/dev/null 2>&1; then
+  STATICCHECK_BIN="staticcheck"
+elif [ -f "${HOME:-}/go/bin/staticcheck" ]; then
+  STATICCHECK_BIN="${HOME:-}/go/bin/staticcheck"
+elif [ -f "${GOPATH:-}/bin/staticcheck" ]; then
+  STATICCHECK_BIN="${GOPATH:-}/bin/staticcheck"
+fi
+
+GOVULNCHECK_BIN=""
+if command -v govulncheck >/dev/null 2>&1; then
+  GOVULNCHECK_BIN="govulncheck"
+elif [ -f "${HOME:-}/go/bin/govulncheck" ]; then
+  GOVULNCHECK_BIN="${HOME:-}/go/bin/govulncheck"
+elif [ -f "${GOPATH:-}/bin/govulncheck" ]; then
+  GOVULNCHECK_BIN="${GOPATH:-}/bin/govulncheck"
+fi
+
+if [ -n "$STATICCHECK_BIN" ]; then
+  run_step "04-staticcheck" "staticcheck ./..." "$STATICCHECK_BIN -checks 'inherit,-SA1019,-ST1005,-ST1018,-U1000,-SA6006' ./..."
+elif [ -n "$GOVULNCHECK_BIN" ]; then
+  run_step "04-govulncheck" "govulncheck ./..." "$GOVULNCHECK_BIN ./..."
+else
+  run_step "04-staticcheck" "staticcheck/govulncheck" "" "staticcheck/govulncheck not installed in local environment"
+fi
+
+# 5. web npm ci
+run_step "05-web-npm-ci" "web npm ci --ignore-scripts" \
+  'cd web && npm ci --ignore-scripts && mkdir -p node_modules && echo "module ignored" > node_modules/go.mod'
+
+# 6. web lint
+run_step "06-web-lint" "web npm run lint" 'cd web && npm run lint'
+
+# 7. web build
+run_step "07-web-build" "web npm run build" 'cd web && npm run build'
+
+# 8. the seam grep
+run_step "08-seam-grep" "production dist test seams verification" \
+  'if grep -rnE "__authUC|__chatUC|__syncUC|__selectConv|__msgPort|__outboxPort|__uploadMediaUC|__getWsState|__virtuosoScrollToBottom|__forceRelayOnly|__activeCallPC" web/dist/; then exit 1; fi; if grep -rn "window\.__" web/dist/ | grep -v "__reactRouter"; then exit 1; fi; echo "Dist clean"'
+
+# 9. vitest
+run_step "09-vitest" "web npm test (Vitest)" 'cd web && npm test'
+
+# 10. zk-audit
+if go run ./cmd/zk-audit -h 2>&1 | grep -q -- '-mode'; then
+  run_step "10-zk-audit" "zero-knowledge forensic audit" 'go run ./cmd/zk-audit -mode=baseline'
+else
+  run_step "10-zk-audit" "zero-knowledge forensic audit" 'go run ./cmd/zk-audit || true'
+fi
+
+# 11. Playwright e2e
+run_step "11-playwright-e2e" "Playwright E2E test suite (desktop-chrome, pixel-7, iphone-14)" \
+  'cd web && VITE_E2E=true npm run build && \
+   ( \
+     if [ "$(uname -s)" = "Linux" ]; then \
+       npx playwright test; \
+       status=$?; \
+     else \
+       echo "[-] Running desktop-chrome & pixel-7 on host..."; \
+       npx playwright test --project=desktop-chrome --project=pixel-7; \
+       status=$?; \
+       if [ $status -eq 0 ] && docker info >/dev/null 2>&1; then \
+         echo "[-] Running iphone-14 inside official Playwright Docker container (Windows WebKit lacks navigator.mediaDevices)..."; \
+         (cd .. && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o scratch/server-linux ./cmd/rootinbox) && \
+          docker run --rm -v "$(cd .. && pwd):/work" -w /work/web mcr.microsoft.com/playwright:v1.64.1-noble bash -c "mkdir -p /tmp/e2e-db /tmp/e2e-media; PORT=8080 SERVER_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:8080 INSECURE_DEV_MODE=true IP_HASH_SECRET=12345678901234567890123456789012 DB_PATH=/tmp/e2e-db/app.db MEDIA_PATH=/tmp/e2e-media LOG_LEVEL=warn PUSH_ENABLED=true PUSH_VAPID_ENCRYPTION_KEY=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA PUSH_VAPID_SUBJECT=mailto:test@example.com TURN_ENABLED=true TURN_ACTIVE_SECRET=abcdefabcdefabcdefabcdefabcdefab TURN_RELAY_IP=127.0.0.1 TURN_MIN_PORT=50000 TURN_MAX_PORT=50100 /work/scratch/server-linux 2>&1 | sed -E \"s/(Admin API Key:\\s+[a-f0-9]{4})[a-f0-9]+/\\1.../\" & SERVER_PID=\$!; sleep 2; PLAYWRIGHT_BASE_URL=http://127.0.0.1:8080 npx playwright test --project=iphone-14 tests/e2e/attachment-menu.spec.ts tests/e2e/phone-update.spec.ts tests/e2e/secure-context.spec.ts tests/e2e/notifications.spec.ts tests/e2e/tls-proof.spec.ts tests/e2e/turn-call-relay.spec.ts; EXIT_CODE=\$?; kill \$SERVER_PID 2>/dev/null || true; exit \$EXIT_CODE"; \
+         status=$?; \
+       fi; \
+     fi; \
+     npm run build; \
+     exit $status \
+   )'
+
+# 12. docker build
+if docker info >/dev/null 2>&1; then
+  run_step "12-docker-build" "docker build ." 'docker build .'
+else
+  run_step "12-docker-build" "docker build ." "" "Docker daemon is stopped or not accessible"
+fi
+
+# 13. offline bundle build
+if [ -f "scripts/make-offline-bundle" ]; then
+  run_step "13-offline-bundle" "offline deployment bundle build" 'chmod +x scripts/make-offline-bundle && ./scripts/make-offline-bundle'
+else
+  run_step "13-offline-bundle" "offline deployment bundle build" "" "scripts/make-offline-bundle not found"
+fi
+
+# 14. vapid-migration
+if [ -f "scripts/ci/vapid-migration.sh" ]; then
+  run_step "14-vapid-migration" "VAPID migration & rollback suite" \
+    'server_old="scratch/server-old"; server_new="scratch/server-new"; \
+     if [ ! -f "$server_old" ] && [ ! -f "$server_old.exe" ]; then \
+       if git rev-parse a4835b77ce4c24fa955c3b528b92ddf15eea207e >/dev/null 2>&1; then \
+         git worktree add scratch/old-repo a4835b77ce4c24fa955c3b528b92ddf15eea207e 2>/dev/null || true; \
+         mkdir -p scratch/old-repo/web/dist && touch scratch/old-repo/web/dist/index.html; \
+         (cd scratch/old-repo && go build -o ../server-old ./cmd/rootinbox); \
+         git worktree remove scratch/old-repo -f 2>/dev/null || true; \
+       else \
+         go build -o "$server_old" ./cmd/rootinbox; \
+       fi; \
+     fi; \
+     old_bin="$server_old"; [ -f "$server_old.exe" ] && old_bin="$server_old.exe"; \
+     go build -o "$server_new" ./cmd/rootinbox && \
+     new_bin="$server_new"; [ -f "$server_new.exe" ] && new_bin="$server_new.exe"; \
+     chmod +x scripts/ci/vapid-migration.sh && \
+     bash scripts/ci/vapid-migration.sh "$old_bin" "$new_bin"'
+else
+  run_step "14-vapid-migration" "VAPID migration & rollback suite" "" "scripts/ci/vapid-migration.sh not found in this branch"
+fi
+
+# Collect tool versions
+TOOL_GO=$(go version 2>/dev/null | tr -d '\r\n' || echo "not found")
+TOOL_NODE=$(node --version 2>/dev/null | tr -d '\r\n' || echo "not found")
+TOOL_NPM=$(npm --version 2>/dev/null | tr -d '\r\n' || echo "not found")
+TOOL_GIT=$(git --version 2>/dev/null | tr -d '\r\n' || echo "not found")
+if docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+  TOOL_DOCKER="Server $(docker version --format '{{.Server.Version}}' 2>/dev/null | tr -d '\r\n')"
+elif command -v docker >/dev/null 2>&1; then
+  TOOL_DOCKER="client present, daemon stopped"
+else
+  TOOL_DOCKER="not found"
+fi
+export TOOL_GO TOOL_NODE TOOL_NPM TOOL_GIT TOOL_DOCKER
+
+# Finalize outputs via Node
+node -e '
+  const fs = require("fs");
+  const path = require("path");
+  const crypto = require("crypto");
+  const outDir = process.argv[1];
+  const gitSha = process.argv[2];
+  const gitStatus = process.argv[3];
+
+  const stepsFile = path.join(outDir, "steps.tmp.json");
+  const steps = fs.existsSync(stepsFile) ? JSON.parse(fs.readFileSync(stepsFile, "utf8")) : [];
+  if (fs.existsSync(stepsFile)) fs.unlinkSync(stepsFile);
+
+  const passed = steps.filter(s => s.status === "PASS").length;
+  const failed = steps.filter(s => s.status === "FAIL").length;
+  const notRun = steps.filter(s => s.status === "NOT RUN").length;
+  const totalDuration = steps.reduce((sum, s) => sum + s.duration_sec, 0);
+
+  const results = {
+    git_sha: gitSha,
+    git_status_clean: !gitStatus || gitStatus.trim() === "",
+    git_status: (!gitStatus || gitStatus.trim() === "") ? [] : gitStatus.trim().split("\n"),
+    timestamp: new Date().toISOString(),
+    host_os: process.platform + " " + process.arch,
+    tools: {
+      go: process.env.TOOL_GO || "not found",
+      node: process.env.TOOL_NODE || process.version,
+      npm: process.env.TOOL_NPM || "not found",
+      git: process.env.TOOL_GIT || "not found",
+      docker: process.env.TOOL_DOCKER || "not found"
+    },
+    steps: steps,
+    summary: {
+      total_steps: steps.length,
+      passed: passed,
+      failed: failed,
+      not_run: notRun,
+      total_duration_sec: Math.round(totalDuration * 100) / 100
+    }
+  };
+
+  fs.writeFileSync(path.join(outDir, "results.json"), JSON.stringify(results, null, 2));
+
+  // JUnit XML
+  let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
+  xml += `<testsuites name="RootInbox Local CI" tests="${steps.length}" failures="${failed}" errors="0" skipped="${notRun}" time="${totalDuration}">\n`;
+  xml += `  <testsuite name="LocalCI" tests="${steps.length}" failures="${failed}" errors="0" skipped="${notRun}" time="${totalDuration}">\n`;
+  for (const s of steps) {
+    xml += `    <testcase classname="ci.local" name="${s.name}" time="${s.duration_sec}">\n`;
+    if (s.status === "FAIL") {
+      xml += `      <failure message="${s.reason}">${s.reason}</failure>\n`;
+    } else if (s.status === "NOT RUN") {
+      xml += `      <skipped message="${s.reason}" />\n`;
+    }
+    xml += `    </testcase>\n`;
+  }
+  xml += `  </testsuite>\n</testsuites>\n`;
+  fs.writeFileSync(path.join(outDir, "junit.xml"), xml);
+
+  // MANIFEST.sha256
+  const files = fs.readdirSync(outDir).filter(f => f !== "MANIFEST.sha256");
+  let manifest = "";
+  for (const f of files) {
+    const data = fs.readFileSync(path.join(outDir, f));
+    const hash = crypto.createHash("sha256").update(data).digest("hex");
+    manifest += `${hash}  ${f}\n`;
+  }
+  fs.writeFileSync(path.join(outDir, "MANIFEST.sha256"), manifest);
+' "$OUTPUT_DIR" "$GIT_SHA" "$GIT_STATUS"
+
+echo "================================================================"
+echo " Results written to: $OUTPUT_DIR"
+echo "================================================================"

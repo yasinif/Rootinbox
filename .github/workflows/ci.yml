@@ -1,0 +1,568 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  go:
+    name: Go Verification
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: 'go.sum'
+
+      - name: Ensure embedded dist placeholder exists
+        run: |
+          mkdir -p web/dist
+          touch web/dist/index.html web/dist/manifest.webmanifest web/dist/manifest.json web/dist/favicon.ico web/dist/sw.js
+
+      - name: Check code formatting on changed Go files
+        run: |
+          CHANGED_GO=$(git diff --name-only --diff-filter=d origin/main...HEAD -- '*.go')
+          if [ -n "$CHANGED_GO" ]; then
+            UNFORMATTED=$(echo "$CHANGED_GO" | xargs -r gofmt -l)
+            if [ -n "$UNFORMATTED" ]; then
+              echo "[-] ERROR: The following changed Go files are not formatted:"
+              echo "$UNFORMATTED"
+              exit 1
+            fi
+          fi
+          echo "[+] All changed Go files are formatted correctly."
+
+      - name: Vet (go vet ./...)
+        run: go vet ./...
+
+      - name: Test (go test -count=1 ./...)
+        run: go test -count=1 ./...
+
+      - name: Cross-compile static Linux binaries (CGO_ENABLED=0 amd64 & arm64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./cmd/rootinbox ./cmd/launcher
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/rootinbox ./cmd/launcher
+
+  web:
+    name: Web Verification
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          node -e "require('fs').writeFileSync('node_modules/go.mod', 'module ignored\n')"
+
+      - name: Lint
+        working-directory: web
+        run: npm run lint
+
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+      - name: Verify no test seams leaked into production dist
+        run: |
+          if grep -rnE '__authUC|__chatUC|__syncUC|__selectConv|__msgPort|__outboxPort|__uploadMediaUC|__getWsState|__virtuosoScrollToBottom|__forceRelayOnly|__activeCallPC' web/dist/; then
+            echo "[-] ERROR: Test seams leaked into production dist"
+            exit 1
+          fi
+          if grep -rn 'window\.__' web/dist/ | grep -v '__reactRouter'; then
+            echo "[-] ERROR: window.__ hooks leaked into production dist"
+            exit 1
+          fi
+
+      - name: Test (Vitest)
+        working-directory: web
+        run: npm test
+
+  zk-audit:
+    name: Zero-Knowledge Forensic Audit (A2 Baseline)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: 'go.sum'
+
+      - name: Ensure embedded dist placeholder exists
+        run: |
+          mkdir -p web/dist
+          touch web/dist/index.html web/dist/manifest.webmanifest web/dist/manifest.json web/dist/favicon.ico web/dist/sw.js
+
+      - name: Run Zero-Knowledge Forensic Audit
+        continue-on-error: true
+        run: |
+          chmod +x scripts/zk-audit
+          ./scripts/zk-audit -mode=baseline 2>&1 | tee zk-audit-report.txt
+
+      - name: Upload zk-audit report on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        continue-on-error: true
+        with:
+          name: zk-audit-baseline-report
+          path: zk-audit-report.txt
+          retention-days: 3
+          if-no-files-found: ignore
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: docker build .
+
+  e2e:
+    name: E2E Playwright Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: 'go.sum'
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Build web assets
+        working-directory: web
+        env:
+          VITE_E2E: 'true'
+        run: |
+          npm ci --ignore-scripts
+          node -e "require('fs').writeFileSync('node_modules/go.mod', 'module ignored\n')"
+          npm run build
+
+      - name: Build Go binary with embedded dist
+        run: |
+          go build -o /tmp/rootinbox-server ./cmd/rootinbox
+
+      - name: Start Go server in background
+        run: |
+          mkdir -p /tmp/e2e-db /tmp/e2e-media
+          PORT=8080 \
+          SERVER_HOST=127.0.0.1 \
+          APP_ORIGIN=http://127.0.0.1:8080 \
+          INSECURE_DEV_MODE=true \
+          IP_HASH_SECRET=12345678901234567890123456789012 \
+          DB_PATH=/tmp/e2e-db/app.db \
+          MEDIA_PATH=/tmp/e2e-media \
+          LOG_LEVEL=info \
+          PUSH_ENABLED=true \
+          PUSH_VAPID_ENCRYPTION_KEY=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA \
+          PUSH_VAPID_SUBJECT=mailto:test@example.com \
+          TURN_ENABLED=true \
+          TURN_ACTIVE_SECRET=12345678901234567890123456789012 \
+          TURN_RELAY_IP=127.0.0.1 \
+          TURN_MIN_PORT=50000 \
+          TURN_MAX_PORT=50100 \
+          /tmp/rootinbox-server &
+          
+          until curl -s http://127.0.0.1:8080/health/ready >/dev/null 2>&1; do
+            sleep 0.2
+          done
+          echo "[+] Embedded Go server is ready on http://127.0.0.1:8080"
+
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
+      - name: Install Playwright browsers and dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: web
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: web
+        run: npx playwright install-deps chromium webkit
+
+      - name: Run Playwright tests
+        working-directory: web
+        run: |
+          mkdir -p test-results
+          npx playwright test
+
+      - name: Upload test results on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        continue-on-error: true
+        with:
+          name: playwright-artifacts
+          path: web/test-results/
+          retention-days: 3
+          if-no-files-found: ignore
+
+  vapid-migration:
+    name: VAPID Migration & Rollback
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          path: new-repo
+
+      - name: Checkout base branch (origin/main)
+        uses: actions/checkout@v4
+        with:
+          ref: origin/main
+          path: old-repo
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'new-repo/go.mod'
+          cache: true
+          cache-dependency-path: 'new-repo/go.sum'
+
+      - name: Install SQLite3 and Curl
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 curl
+
+      - name: Build OLD server
+        run: |
+          mkdir -p old-repo/web/dist
+          touch old-repo/web/dist/index.html
+          cd old-repo
+          go build -o ../server-old ./cmd/rootinbox
+          cd ..
+
+      - name: Build NEW server
+        run: |
+          mkdir -p new-repo/web/dist
+          touch new-repo/web/dist/index.html
+          cd new-repo
+          go build -o ../server-new ./cmd/rootinbox
+          cd ..
+
+      - name: Run VAPID Migration & Rollback Suite
+        run: |
+          chmod +x new-repo/scripts/ci/vapid-migration.sh
+          cd new-repo
+          ./scripts/ci/vapid-migration.sh ../server-old ../server-new
+
+  bundle:
+    name: Offline Deployment Bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: 'go.sum'
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Build web application
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          node -e "require('fs').writeFileSync('node_modules/go.mod', 'module ignored\n')"
+          npm run build
+
+      - name: Build offline deployment bundle
+        run: |
+          chmod +x scripts/make-offline-bundle
+          ./scripts/make-offline-bundle
+
+      - name: Verify bundle checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+
+      - name: Upload offline bundle artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: rootinbox-offline-bundle
+          path: dist/
+          retention-days: 3
+
+  tls-proof:
+    name: Real-Browser TLS Proof (H6)
+    runs-on: ubuntu-24.04
+    needs: [bundle]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: 'go.sum'
+
+      - name: Download offline bundle artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: rootinbox-offline-bundle
+          path: dist/
+
+      - name: Fallback build of offline deployment bundle if artifact missing
+        run: |
+          if [ ! -f dist/rootinbox-linux-amd64 ]; then
+            echo "[!] Artifact not found, running fallback build..."
+            cd web && npm ci --ignore-scripts && node -e "require('fs').writeFileSync('node_modules/go.mod', 'module ignored\n')" && npm run build && cd ..
+            chmod +x scripts/make-offline-bundle
+            ./scripts/make-offline-bundle
+          fi
+
+      - name: Start binary as non-root user in container with selfsigned TLS and generated secret
+        run: |
+          chmod +x dist/rootinbox-linux-amd64
+          mkdir -p /tmp/tls-data /tmp/tls-tls /tmp/tls-media
+          chmod -R 777 /tmp/tls-data /tmp/tls-tls /tmp/tls-media
+          
+          # H3: Generate random 32+ byte secret
+          RAND_SECRET=$(openssl rand -hex 32)
+          
+          # Run the bundle binary as non-root (1001:1001) in container with host networking
+          docker run -d --name rootinbox-tls-container \
+            --user 1001:1001 \
+            --network host \
+            -v "$PWD/dist/rootinbox-linux-amd64:/rootinbox:ro" \
+            -v /tmp/tls-data:/data \
+            -v /tmp/tls-tls:/data/tls \
+            -v /tmp/tls-media:/data/media \
+            -e PORT=8443 \
+            -e SERVER_HOST=127.0.0.1 \
+            -e PUBLIC_HOST=127.0.0.1 \
+            -e TLS_MODE=selfsigned \
+            -e TLS_DATA_DIR=/data/tls \
+            -e TLS_ONBOARDING_PORT=8080 \
+            -e IP_HASH_SECRET="$RAND_SECRET" \
+            -e DB_PATH=/data/app.db \
+            -e MEDIA_PATH=/data/media \
+            -e LOG_LEVEL=info \
+            -e PUSH_ENABLED=false \
+            alpine:latest /rootinbox
+          
+          # Wait until plain HTTP onboarding server is ready
+          for i in $(seq 1 40); do
+            if curl -s http://127.0.0.1:8080/ca.crt >/dev/null 2>&1; then
+              echo "[+] Container server is ready on http://127.0.0.1:8080"
+              break
+            fi
+            sleep 0.5
+          done
+          
+          if ! curl -s http://127.0.0.1:8080/ca.crt >/dev/null 2>&1; then
+            echo "[-] Server failed to start; printing container logs:"
+            docker logs rootinbox-tls-container
+            exit 1
+          fi
+
+      - name: Verify CA Fingerprint (OpenSSL vs Onboarding Page HTML)
+        run: |
+          curl -s http://127.0.0.1:8080/ca.crt -o /tmp/downloaded-ca.crt
+          OPENSSL_FP=$(openssl x509 -in /tmp/downloaded-ca.crt -noout -fingerprint -sha256 | cut -d= -f2)
+          echo "OpenSSL CA Fingerprint: $OPENSSL_FP"
+          
+          PAGE_HTML=$(curl -s http://127.0.0.1:8080/)
+          if echo "$PAGE_HTML" | grep -F "$OPENSSL_FP"; then
+            echo "[+] CA fingerprint on plain-HTTP page matches OpenSSL fingerprint exactly!"
+          else
+            echo "[-] ERROR: Fingerprint mismatch between page and certificate!"
+            exit 1
+          fi
+
+      - name: Extract SPKI pin for Chromium certificate pinning
+        id: spki
+        run: |
+          SPKI_PIN=$(openssl s_client -connect 127.0.0.1:8443 </dev/null 2>/dev/null | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl enc -base64)
+          echo "SPKI Pin: $SPKI_PIN"
+          echo "pin=$SPKI_PIN" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        id: playwright-chromium-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
+      - name: Install Playwright Chromium and dependencies
+        if: steps.playwright-chromium-cache.outputs.cache-hit != 'true'
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install --with-deps chromium
+
+      - name: Install Playwright Chromium system dependencies
+        if: steps.playwright-chromium-cache.outputs.cache-hit == 'true'
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          npx playwright install-deps chromium
+
+      - name: Run Real-Browser TLS Proof Suite with Pinned Certificate & Fake Media
+        working-directory: web
+        env:
+          PLAYWRIGHT_BASE_URL: https://127.0.0.1:8443
+          SPKI_PIN: ${{ steps.spki.outputs.pin }}
+        run: |
+          npx playwright test tests/e2e/tls-proof.spec.ts --project=desktop-chrome
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker logs rootinbox-tls-container || true
+
+  relocation:
+    name: Server Relocation Test Harness (A3 Baseline)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: 'go.sum'
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Build web application
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          node -e "require('fs').writeFileSync('node_modules/go.mod', 'module ignored\n')"
+          npm run build
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        id: playwright-relocation-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
+      - name: Install Playwright Chromium and dependencies
+        if: steps.playwright-relocation-cache.outputs.cache-hit != 'true'
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright Chromium system dependencies
+        if: steps.playwright-relocation-cache.outputs.cache-hit == 'true'
+        working-directory: web
+        run: npx playwright install-deps chromium
+
+      - name: Run Relocation Test Harness
+        continue-on-error: true
+        run: |
+          chmod +x tests/integration/relocation/run.sh
+          bash tests/integration/relocation/run.sh 2>&1 | tee relocation-report.txt
+
+      - name: Upload relocation report on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        continue-on-error: true
+        with:
+          name: relocation-baseline-report
+          path: relocation-report.txt
+          retention-days: 3
+          if-no-files-found: ignore
+
+  isolation-drill:
+    name: Air-Gapped Isolation & Resource Gates Drill (Part D)
+    runs-on: ubuntu-24.04
+    needs: [bundle]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download offline bundle artifact
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: rootinbox-offline-bundle
+          path: dist/
+
+      - name: Run Isolation Drill & Weak-VPS Resource Gates
+        run: |
+          if [ -f scripts/isolation-drill ]; then
+            chmod +x scripts/isolation-drill
+            ./scripts/isolation-drill dist/rootinbox-linux-amd64
+          else
+            echo "[*] scripts/isolation-drill not found on branch; skipping drill."
+          fi

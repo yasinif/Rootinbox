@@ -1,0 +1,2 @@
+*.sh text eol=lf
+scripts/make-offline-bundle text eol=lf

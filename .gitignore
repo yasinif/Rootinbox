@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+web/node_modules/
+
+# Build artifacts
+dist/
+web/dist/*
+!web/dist/index.html
+!web/dist/manifest.webmanifest
+!web/dist/manifest.json
+!web/dist/favicon.ico
+!web/dist/sw.js
+web/test-results/
+web/playwright-report/
+rootinbox.exe
+/rootinbox
+launcher.exe
+/launcher
+server-old*
+server-new*
+
+# Database and runtime storage
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+rootinbox.db
+
+# Logs and environment
+*.log
+agent-logs/
+agent-progress.md
+.env
+.env.*
+
+# Scratch and temporary directories
+scratch/
+tmp/
+
+# OS and IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Agent and Arena benchmarks
+.agents/
+.arena/
