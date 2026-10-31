@@ -18,21 +18,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BINARY_PATH="${1:-${ROOT_DIR}/dist/rootinbox-linux-amd64}"
+if [[ "$BINARY_PATH" != /* ]]; then
+  BINARY_PATH="$PWD/$BINARY_PATH"
+fi
 
 echo "======================================================================"
 echo "RootInbox Air-Gapped Isolation & Weak-VPS Resource Gates Drill"
 echo "======================================================================"
 echo "Target Binary: $BINARY_PATH"
 
-# 0. Ensure binary exists or build it
+# 0. Ensure binary exists (strict gate: must fail if binary is missing)
 if [ ! -f "$BINARY_PATH" ]; then
-  echo "[+] Binary not found at $BINARY_PATH, compiling static linux/amd64 binary..."
-  mkdir -p "$(dirname "$BINARY_PATH")"
-  if [ ! -f "$ROOT_DIR/web/dist/index.html" ]; then
-    mkdir -p "$ROOT_DIR/web/dist"
-    touch "$ROOT_DIR/web/dist/index.html"
-  fi
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$BINARY_PATH" "$ROOT_DIR/cmd/rootinbox"
+  echo "[-] ERROR: Target binary not found at $BINARY_PATH" >&2
+  exit 1
 fi
 
 chmod +x "$BINARY_PATH"
