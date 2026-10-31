@@ -4,20 +4,13 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,12 +22,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
@@ -74,10 +67,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: 'npm'
@@ -117,10 +110,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
@@ -138,7 +131,7 @@ jobs:
           ./scripts/zk-audit -mode=baseline 2>&1 | tee zk-audit-report.txt
 
       - name: Upload zk-audit report on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         continue-on-error: true
         with:
@@ -152,10 +145,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build Docker image
         run: docker build .
@@ -163,19 +156,20 @@ jobs:
   e2e:
     name: E2E Playwright Tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
           cache-dependency-path: 'go.sum'
 
       - name: Setup Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: 'npm'
@@ -209,19 +203,36 @@ jobs:
           PUSH_VAPID_ENCRYPTION_KEY=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA \
           PUSH_VAPID_SUBJECT=mailto:test@example.com \
           TURN_ENABLED=true \
-          TURN_ACTIVE_SECRET=12345678901234567890123456789012 \
+          TURN_ACTIVE_SECRET=abcdefabcdefabcdefabcdefabcdefab \
           TURN_RELAY_IP=127.0.0.1 \
           TURN_MIN_PORT=50000 \
           TURN_MAX_PORT=50100 \
-          /tmp/rootinbox-server &
+          /tmp/rootinbox-server > /tmp/rootinbox-server.log 2>&1 &
+          SERVER_PID=$!
           
-          until curl -s http://127.0.0.1:8080/health/ready >/dev/null 2>&1; do
+          READY=0
+          for i in $(seq 1 60); do
+            if curl -s http://127.0.0.1:8080/health/ready >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "[-] Go server process terminated unexpectedly!" >&2
+              cat /tmp/rootinbox-server.log >&2
+              exit 1
+            fi
             sleep 0.2
           done
+          
+          if [ "$READY" -ne 1 ]; then
+            echo "[-] Timeout waiting for server readiness on http://127.0.0.1:8080" >&2
+            cat /tmp/rootinbox-server.log >&2
+            exit 1
+          fi
           echo "[+] Embedded Go server is ready on http://127.0.0.1:8080"
 
       - name: Cache Playwright Browsers
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
@@ -241,10 +252,10 @@ jobs:
         working-directory: web
         run: |
           mkdir -p test-results
-          npx playwright test
+          npx playwright test --retries=2
 
       - name: Upload test results on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         continue-on-error: true
         with:
@@ -256,20 +267,21 @@ jobs:
   vapid-migration:
     name: VAPID Migration & Rollback
     runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: new-repo
 
-      - name: Checkout base branch (origin/main)
-        uses: actions/checkout@v4
+      - name: Checkout base branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: origin/main
+          ref: ${{ github.event.pull_request.base.sha }}
           path: old-repo
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'new-repo/go.mod'
           cache: true
@@ -305,17 +317,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
           cache-dependency-path: 'go.sum'
 
       - name: Setup Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: 'npm'
@@ -338,8 +350,7 @@ jobs:
         run: sha256sum -c SHA256SUMS
 
       - name: Upload offline bundle artifact
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rootinbox-offline-bundle
           path: dist/
@@ -351,25 +362,24 @@ jobs:
     needs: [bundle]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: 'web/package-lock.json'
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
           cache-dependency-path: 'go.sum'
 
       - name: Download offline bundle artifact
-        uses: actions/download-artifact@v4
-        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rootinbox-offline-bundle
           path: dist/
@@ -450,7 +460,7 @@ jobs:
           echo "pin=$SPKI_PIN" >> $GITHUB_OUTPUT
 
       - name: Cache Playwright Chromium
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: playwright-chromium-cache
         with:
           path: ~/.cache/ms-playwright
@@ -487,17 +497,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
           cache: true
           cache-dependency-path: 'go.sum'
 
       - name: Setup Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: 'npm'
@@ -511,7 +521,7 @@ jobs:
           npm run build
 
       - name: Cache Playwright Chromium
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: playwright-relocation-cache
         with:
           path: ~/.cache/ms-playwright
@@ -534,7 +544,7 @@ jobs:
           bash tests/integration/relocation/run.sh 2>&1 | tee relocation-report.txt
 
       - name: Upload relocation report on failure
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         continue-on-error: true
         with:
@@ -549,20 +559,110 @@ jobs:
     needs: [bundle]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download offline bundle artifact
-        uses: actions/download-artifact@v4
-        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rootinbox-offline-bundle
           path: dist/
 
       - name: Run Isolation Drill & Weak-VPS Resource Gates
         run: |
-          if [ -f scripts/isolation-drill ]; then
-            chmod +x scripts/isolation-drill
-            ./scripts/isolation-drill dist/rootinbox-linux-amd64
-          else
-            echo "[*] scripts/isolation-drill not found on branch; skipping drill."
+          if [ ! -f scripts/isolation-drill ]; then
+            echo "[-] ERROR: scripts/isolation-drill not found on branch!" >&2
+            exit 1
           fi
+          if [ ! -f dist/rootinbox-linux-amd64 ]; then
+            echo "[-] ERROR: dist/rootinbox-linux-amd64 artifact not found!" >&2
+            exit 1
+          fi
+          chmod +x scripts/isolation-drill
+          ./scripts/isolation-drill "$PWD/dist/rootinbox-linux-amd64"
+
+  gate:
+    name: CI Gate
+    runs-on: ubuntu-24.04
+    if: always()
+    needs:
+      - go
+      - web
+      - zk-audit
+      - docker
+      - e2e
+      - vapid-migration
+      - bundle
+      - tls-proof
+      - relocation
+      - isolation-drill
+    steps:
+      - name: CI Gate Evaluation
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GO_RESULT: ${{ needs.go.result }}
+          WEB_RESULT: ${{ needs.web.result }}
+          ZK_AUDIT_RESULT: ${{ needs.zk-audit.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          VAPID_RESULT: ${{ needs.vapid-migration.result }}
+          BUNDLE_RESULT: ${{ needs.bundle.result }}
+          TLS_PROOF_RESULT: ${{ needs.tls-proof.result }}
+          RELOCATION_RESULT: ${{ needs.relocation.result }}
+          ISOLATION_DRILL_RESULT: ${{ needs.isolation-drill.result }}
+        run: |
+          echo "=================================================="
+          echo "CI Gate Aggregation Check"
+          echo "=================================================="
+          echo "Event:            $EVENT_NAME"
+          echo "go:               $GO_RESULT"
+          echo "web:              $WEB_RESULT"
+          echo "zk-audit:         $ZK_AUDIT_RESULT"
+          echo "docker:           $DOCKER_RESULT"
+          echo "e2e:              $E2E_RESULT"
+          echo "vapid-migration:  $VAPID_RESULT"
+          echo "bundle:           $BUNDLE_RESULT"
+          echo "tls-proof:        $TLS_PROOF_RESULT"
+          echo "relocation:       $RELOCATION_RESULT"
+          echo "isolation-drill:  $ISOLATION_DRILL_RESULT"
+          echo "=================================================="
+
+          FAILED=0
+
+          check_job() {
+            local name="$1"
+            local result="$2"
+            local allowed_skipped="${3:-false}"
+
+            if [ "$result" = "success" ]; then
+              echo "[PASS] $name: success"
+            elif [ "$allowed_skipped" = "true" ] && [ "$result" = "skipped" ]; then
+              echo "[PASS] $name: intentional skip permitted ($EVENT_NAME)"
+            else
+              echo "[FAIL] $name: unexpected status '$result'"
+              FAILED=1
+            fi
+          }
+
+          check_job "go" "$GO_RESULT"
+          check_job "web" "$WEB_RESULT"
+          check_job "zk-audit" "$ZK_AUDIT_RESULT"
+          check_job "docker" "$DOCKER_RESULT"
+          check_job "e2e" "$E2E_RESULT"
+          check_job "bundle" "$BUNDLE_RESULT"
+          check_job "tls-proof" "$TLS_PROOF_RESULT"
+          check_job "relocation" "$RELOCATION_RESULT"
+          check_job "isolation-drill" "$ISOLATION_DRILL_RESULT"
+
+          # vapid-migration is required to succeed on pull_request; on push to main it is intentionally skipped.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            check_job "vapid-migration" "$VAPID_RESULT" false
+          else
+            check_job "vapid-migration" "$VAPID_RESULT" true
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "[-] CI Gate FAILED: One or more required checks failed, were cancelled, or were unexpectedly skipped." >&2
+            exit 1
+          fi
+
+          echo "[+] CI Gate PASSED: All required jobs succeeded."

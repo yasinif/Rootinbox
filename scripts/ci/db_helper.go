@@ -1,9 +1,16 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -13,8 +20,70 @@ import (
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Fprintf(os.Stderr, "usage: db_helper <db_path> <query> [exec] OR db_helper seed-auth <db_path> <hex_token>\n")
+		fmt.Fprintf(os.Stderr, "usage: db_helper <db_path> <query> [exec] OR db_helper seed-auth <db_path> <hex_token> OR db_helper seed-zero-vapid <db_path>\n")
 		os.Exit(1)
+	}
+
+	if os.Args[1] == "seed-zero-vapid" {
+		dbPath := os.Args[2]
+		curve := elliptic.P256()
+		priv, err := ecdsa.GenerateKey(curve, rand.Reader)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error generating key: %v\n", err)
+			os.Exit(1)
+		}
+
+		var scalar32 [32]byte
+		priv.D.FillBytes(scalar32[:])
+
+		var x32, y32 [32]byte
+		priv.PublicKey.X.FillBytes(x32[:])
+		priv.PublicKey.Y.FillBytes(y32[:])
+
+		pubUncompressed := make([]byte, 1+32+32)
+		pubUncompressed[0] = 0x04
+		copy(pubUncompressed[1:33], x32[:])
+		copy(pubUncompressed[33:65], y32[:])
+
+		pubB64 := base64.RawURLEncoding.EncodeToString(pubUncompressed)
+
+		var zeroKey [32]byte
+		block, err := aes.NewCipher(zeroKey[:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating cipher: %v\n", err)
+			os.Exit(1)
+		}
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error creating gcm: %v\n", err)
+			os.Exit(1)
+		}
+
+		var iv [12]byte
+		if _, err := rand.Read(iv[:]); err != nil {
+			fmt.Fprintf(os.Stderr, "error reading iv: %v\n", err)
+			os.Exit(1)
+		}
+
+		aad := []byte("rootinbox/v1/vapid-private-key")
+		sealed := gcm.Seal(nil, iv[:], scalar32[:], aad)
+		encryptedHex := hex.EncodeToString(append(iv[:], sealed...))
+
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error opening db: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
+		now := time.Now().Unix()
+		_, err = db.Exec("INSERT INTO application_keys (id, private_key_encrypted, public_key_uncompressed, created_at) VALUES ('vapid', ?, ?, ?)", encryptedHex, pubB64, now)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error inserting vapid key: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("seeded zero-vapid key: %s\n", pubB64)
+		return
 	}
 
 	if os.Args[1] == "seed-auth" {
@@ -79,6 +148,9 @@ func main() {
 	var result string
 	err = db.QueryRow(query).Scan(&result)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return
+		}
 		fmt.Fprintf(os.Stderr, "error querying: %v\n", err)
 		os.Exit(1)
 	}
