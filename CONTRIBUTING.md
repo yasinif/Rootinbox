@@ -56,3 +56,13 @@ go test ./...
    - End-to-End tests: `cd web && npx playwright test`
 5. **Licensing**:
    - All contributions must be compatible with the GNU Affero General Public License v3.0 (AGPL-3.0).
+
+---
+
+## Support
+
+If you need help configuring or troubleshooting RootInbox:
+- **Discussions**: Use [GitHub Discussions](https://github.com/yasinif/Rootinbox/discussions) for architecture questions, community help, and deployment sharing.
+- **Issue Tracker**: Use [GitHub Issues](https://github.com/yasinif/Rootinbox/issues) exclusively for verified bugs and reproducible problems.
+- **Security Inquiries**: For security vulnerabilities, do not open public issues. Follow the guidelines in [SECURITY.md](SECURITY.md).
+

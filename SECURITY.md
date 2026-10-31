@@ -17,12 +17,6 @@ Please use GitHub's **Private Vulnerability Reporting** feature:
 
 This opens a confidential advisory channel accessible only to maintainers and the reporter.
 
-### 2. Encrypted Email Reporting
-
-Alternatively, you may reach maintainers via:
-- **Email**: `294417245+yasinif@users.noreply.github.com`
-- Please include `[SECURITY] RootInbox Vulnerability Report` in the subject line.
-
 ---
 
 ## Response Process & SLA
