@@ -138,7 +138,15 @@ echo "[+] OLD server started successfully (PID: $SERVER_PID)"
 # Verify zero-key VAPID row was created in SQLite
 OLD_PUB_KEY=$(db_query "$DB_PATH" "SELECT public_key_uncompressed FROM application_keys WHERE id = 'vapid';")
 if [ -z "$OLD_PUB_KEY" ]; then
-  echo "[-] ERROR: Expected vapid row to be created by OLD server, but found none" >&2
+  # If OLD_BIN did not create a zero-key row (e.g. baseline commit skips VAPID when PUSH_ENABLED=false),
+  # seed the pre-migration zero-key state so that migration from zero-key can be verified.
+  echo "[*] OLD server skipped VAPID creation (push disabled); seeding baseline zero-key VAPID state..."
+  go run "$DB_HELPER_SOURCE" seed-zero-vapid "$DB_PATH"
+  OLD_PUB_KEY=$(db_query "$DB_PATH" "SELECT public_key_uncompressed FROM application_keys WHERE id = 'vapid';")
+fi
+
+if [ -z "$OLD_PUB_KEY" ]; then
+  echo "[-] ERROR: Expected vapid row to be created by OLD server or seeded, but found none" >&2
   cat "$TMP_DIR/old_server.log" >&2
   exit 1
 fi
