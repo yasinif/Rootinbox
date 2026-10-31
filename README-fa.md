@@ -29,18 +29,40 @@
 
 ## راه‌اندازی سریع
 
-### اجرا با داکر (Docker)
+### ۱. ساخت و اجرا از سورس کد
 ```bash
+# ساخت فایل باینری Go
+go build -o rootinbox ./cmd/rootinbox
+
+# اجرای سرور (پیش‌فرض روی 127.0.0.1:8080 با دیتابیس درون data/.)
+./rootinbox
+```
+
+### ۲. ساخت و اجرا با داکر (Docker Local Build)
+```bash
+# ساخت ایمیج لوکال
+docker build -t rootinbox:local .
+
+# اجرای کانتینر
 docker run -d \
   -p 8080:8080 \
   -v rootinbox_data:/data \
   --name rootinbox \
-  ghcr.io/yasinif/rootinbox:latest
+  rootinbox:local
 ```
 کلید یک‌بار‌مصرف ورود به پنل مدیریت در لاگ اولیه سرور چاپ می‌شود:
 ```bash
 docker logs rootinbox
 ```
+
+### ۳. بسته نصبی آفلاین (Air-Gapped Offline Bundle)
+برای محیط‌های بدون اینترنت یا ایزوله، می‌توانید با اسکریپت زیر بسته تک‌فایلی مستقل تولید کنید:
+```bash
+./scripts/make-offline-bundle
+```
+
+### ۴. استقرار ابری در Railway
+روت‌اینباکس بدون نیاز به هیچ پیکربندی خاصی در پلتفرم Railway اجرا می‌شود. لطفاً راهنمای [docs/RAILWAY-fa.md](docs/RAILWAY-fa.md) را مطالعه فرمایید.
 
 ---
 

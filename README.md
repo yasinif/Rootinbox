@@ -31,28 +31,40 @@ RootInbox is actively evolving toward a complete Zero-Knowledge End-to-End Encry
 
 ## Quick Start (Zero-Config)
 
-### 1. Docker
+### 1. Build and Run from Source
 ```bash
+# Build Go binary (embeds frontend if web/dist exists)
+go build -o rootinbox ./cmd/rootinbox
+
+# Run server (binds safely to 127.0.0.1:8080, stores state in ./data)
+./rootinbox
+```
+
+### 2. Run with Docker (Local Build)
+```bash
+# Build local container image
+docker build -t rootinbox:local .
+
+# Run container
 docker run -d \
   -p 8080:8080 \
   -v rootinbox_data:/data \
   --name rootinbox \
-  ghcr.io/yasinif/rootinbox:latest
+  rootinbox:local
 ```
 Check the server startup logs to retrieve your initial one-time Admin API Key:
 ```bash
 docker logs rootinbox
 ```
 
-### 2. Standalone Binary
+### 3. Air-Gapped Offline Deployment Bundle
+For isolated or restricted environments, generate a self-contained offline deployment bundle:
 ```bash
-# Build
-go build -o rootinbox ./cmd/rootinbox
-
-# Run
-./rootinbox
+./scripts/make-offline-bundle
 ```
-By default, RootInbox binds safely to `127.0.0.1:8080` and stores state in `./data`.
+
+### 4. Cloud Deployment (Railway)
+RootInbox includes full zero-configuration support for Railway. See [docs/RAILWAY-fa.md](docs/RAILWAY-fa.md) for deployment guidelines.
 
 ---
 

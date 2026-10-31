@@ -4,7 +4,7 @@
 
 We take the security of RootInbox seriously. If you discover a vulnerability or security issue, please follow these guidelines to disclose it responsibly.
 
-### 1. Private Vulnerability Reporting (Preferred)
+### Private Vulnerability Reporting
 
 Please use GitHub's **Private Vulnerability Reporting** feature:
 1. Navigate to the **Security** tab of the `yasinif/Rootinbox` repository.
@@ -16,12 +16,6 @@ Please use GitHub's **Private Vulnerability Reporting** feature:
    - Any suggested mitigations
 
 This opens a confidential advisory channel accessible only to maintainers and the reporter.
-
-### 2. Encrypted Email Reporting
-
-Alternatively, you may reach maintainers via:
-- **Email**: `294417245+yasinif@users.noreply.github.com`
-- Please include `[SECURITY] RootInbox Vulnerability Report` in the subject line.
 
 ---
 
