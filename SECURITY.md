@@ -4,7 +4,7 @@
 
 We take the security of RootInbox seriously. If you discover a vulnerability or security issue, please follow these guidelines to disclose it responsibly.
 
-### 1. Private Vulnerability Reporting (Preferred)
+### Private Vulnerability Reporting
 
 Please use GitHub's **Private Vulnerability Reporting** feature:
 1. Navigate to the **Security** tab of the `yasinif/Rootinbox` repository.
