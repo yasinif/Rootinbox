@@ -120,6 +120,8 @@ seed_auth_session() {
 # (i) OLD server with PUSH_ENABLED=false starts and creates zero-key VAPID row
 # ==============================================================================
 echo "=== Step (i): Starting OLD server with PUSH_ENABLED=false ==="
+echo "[-] Intentional mutation failure for Proof 1" >&2
+exit 1
 PORT=$PORT \
 SERVER_HOST="127.0.0.1" \
 APP_ORIGIN="$APP_ORIGIN" \
