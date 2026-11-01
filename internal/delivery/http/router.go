@@ -59,12 +59,24 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// RFC-0004 §5.2: Challenge endpoint (public).
 	mux.HandleFunc("POST /api/v1/auth/challenge", deps.AuthHandler.HandleChallenge())
 
+	// Pre-auth KDF parameters (RFC Stage 1a, public, anti-enumeration).
+	mux.HandleFunc("GET /api/v1/auth/kdf-params", deps.AuthHandler.HandleKDFParams())
+
 	// RFC-0004 §5.3: Verify endpoint (public).
 	mux.HandleFunc("POST /api/v1/auth/verify", deps.AuthHandler.HandleVerify())
+	mux.HandleFunc("POST /api/v1/auth/login", deps.AuthHandler.HandleVerify())
 
 	// --- Authenticated endpoints (SessionAuth middleware) ---
 	sessionAuth := middleware.SessionAuth(deps.SessionRepo, deps.Logger)
 	optionalSessionAuth := middleware.OptionalSessionAuth(deps.SessionRepo, deps.Logger)
+
+	// RFC Stage 1a: Zero-Knowledge Vault endpoints.
+	mux.Handle("GET /api/v1/vault/current", sessionAuth(
+		http.HandlerFunc(deps.VaultHandler.HandleGetZKVault()),
+	))
+	mux.Handle("PUT /api/v1/vault/current", sessionAuth(
+		http.HandlerFunc(deps.VaultHandler.HandlePutZKVault()),
+	))
 
 	// RFC-0004 §7.3: WebSocket ticket endpoint.
 	mux.Handle("GET /api/v1/auth/ws-ticket", sessionAuth(

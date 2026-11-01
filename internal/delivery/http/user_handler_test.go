@@ -140,6 +140,19 @@ func (m *mockUserRepo) UpdateLastSeen(ctx context.Context, id string, timestampM
 	return nil
 }
 
+func (m *mockUserRepo) UpdateAuthCredentials(ctx context.Context, id string, authPubkey, kdfSalt string, memoryKiB, iterations, parallelism int) error {
+	u, ok := m.usersByID[id]
+	if !ok {
+		return domain.NewDomainError(domain.ErrUsr001, "user not found", nil)
+	}
+	u.AuthPubkey = &authPubkey
+	u.KDFSalt = &kdfSalt
+	u.KDFMemoryKiB = memoryKiB
+	u.KDFIterations = iterations
+	u.KDFParallelism = parallelism
+	return nil
+}
+
 type testLogger struct{}
 
 func (l *testLogger) Info(msg string, args ...any)  {}
@@ -449,4 +462,3 @@ func TestUserHandler_Avatar_Lifecycle(t *testing.T) {
 		t.Fatalf("expected 404 after deletion, got %d", getW3.Code)
 	}
 }
-

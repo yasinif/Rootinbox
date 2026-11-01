@@ -60,11 +60,21 @@ func (h *AuthHandler) HandleRegister() http.HandlerFunc {
 			displayName = r.Header.Get("X-Display-Name")
 		}
 
+		authPubkey := r.URL.Query().Get("auth_pubkey")
+		if authPubkey == "" {
+			authPubkey = r.Header.Get("X-Auth-Pubkey")
+		}
+
+		kdfSalt := r.URL.Query().Get("kdf_salt")
+		if kdfSalt == "" {
+			kdfSalt = r.Header.Get("X-KDF-Salt")
+		}
+
 		ua := r.Header.Get("User-Agent")
 		deviceLabel := ParseDeviceLabel(ua)
 		ctx := domain.WithDeviceLabel(r.Context(), deviceLabel)
 
-		result, err := h.authUC.Register(ctx, body, username, displayName)
+		result, err := h.authUC.Register(ctx, body, username, displayName, authPubkey, kdfSalt)
 		if err != nil {
 			slog.Error("register error", "err", err)
 			WriteDomainError(w, err)
@@ -89,9 +99,35 @@ func (h *AuthHandler) HandleRegister() http.HandlerFunc {
 	}
 }
 
+// HandleKDFParams handles GET /api/v1/auth/kdf-params.
+// Stage 1a: Pre-Auth KDF parameters endpoint.
+func (h *AuthHandler) HandleKDFParams() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		username := r.URL.Query().Get("username")
+		if username == "" {
+			WriteError(w, http.StatusBadRequest, "USR_004", "username parameter is required")
+			return
+		}
+
+		params, err := h.authUC.GetKDFParams(r.Context(), username)
+		if err != nil {
+			WriteDomainError(w, err)
+			return
+		}
+
+		WriteSuccess(w, http.StatusOK, map[string]interface{}{
+			"salt":        params.Salt,
+			"iterations":  params.Iterations,
+			"memory_kib":  params.MemoryKiB,
+			"parallelism": params.Parallelism,
+		}, nil)
+	}
+}
+
 // challengeRequest is the JSON request body for POST /api/v1/auth/challenge.
 type challengeRequest struct {
 	IdentityHash string `json:"identity_hash"`
+	Username     string `json:"username,omitempty"`
 }
 
 // HandleChallenge handles POST /api/v1/auth/challenge.
@@ -104,7 +140,12 @@ func (h *AuthHandler) HandleChallenge() http.HandlerFunc {
 			return
 		}
 
-		result, err := h.authUC.Challenge(r.Context(), req.IdentityHash)
+		ident := req.IdentityHash
+		if ident == "" {
+			ident = req.Username
+		}
+
+		result, err := h.authUC.Challenge(r.Context(), ident)
 		if err != nil {
 			WriteDomainError(w, err)
 			return
@@ -122,6 +163,7 @@ func (h *AuthHandler) HandleChallenge() http.HandlerFunc {
 // verifyRequest is the JSON request body for POST /api/v1/auth/verify.
 type verifyRequest struct {
 	IdentityHash     string `json:"identity_hash"`
+	Username         string `json:"username,omitempty"`
 	ChallengeID      string `json:"challenge_id"`
 	SessionPublicKey string `json:"session_public_key"`
 	Signature        string `json:"signature"`
@@ -151,11 +193,16 @@ func (h *AuthHandler) HandleVerify() http.HandlerFunc {
 			return
 		}
 
+		ident := req.IdentityHash
+		if ident == "" {
+			ident = req.Username
+		}
+
 		ua := r.Header.Get("User-Agent")
 		deviceLabel := ParseDeviceLabel(ua)
 		ctx := domain.WithDeviceLabel(r.Context(), deviceLabel)
 
-		result, err := h.authUC.Verify(ctx, req.IdentityHash, req.ChallengeID,
+		result, err := h.authUC.Verify(ctx, ident, req.ChallengeID,
 			req.SessionPublicKey, req.Signature, req.SessionSignature, *req.SessionExpiresAt)
 		if err != nil {
 			slog.Error("verify handler error", "err", err)
