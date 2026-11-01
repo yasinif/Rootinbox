@@ -122,7 +122,7 @@ export async function apiPut<T>(path: string, body?: unknown): Promise<ApiRespon
   return handleResponse<T>(response);
 }
 
-export async function apiPostBinary<T>(path: string, body: Uint8Array): Promise<ApiResponse<T>> {
+export async function apiPostBinary<T>(path: string, body: Uint8Array, extraHeaders?: Record<string, string>): Promise<ApiResponse<T>> {
   // Copy into a fresh ArrayBuffer to satisfy TypeScript 6.0 strict BodyInit type.
   const buf = new ArrayBuffer(body.byteLength);
   new Uint8Array(buf).set(body);
@@ -133,6 +133,7 @@ export async function apiPostBinary<T>(path: string, body: Uint8Array): Promise<
       'Content-Type': 'application/octet-stream',
       'Accept': 'application/json',
       ...getAuthHeaders(),
+      ...(extraHeaders || {}),
     },
     body: buf,
   });
