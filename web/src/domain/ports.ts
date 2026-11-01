@@ -35,10 +35,25 @@ export interface SessionDTO {
   is_current: boolean;
 }
 
+export interface KdfParamsDTO {
+  salt: string;
+  iterations: number;
+  memory_kib: number;
+  parallelism: number;
+}
+
 export interface AuthPort {
   requestChallenge(identityHash: string): Promise<ChallengeResult>;
-  register(wireBytes: Uint8Array, username?: string, displayName?: string, rememberMe?: boolean): Promise<{ session_token: string; user_id?: string; identity_hash?: string }>;
+  register(
+    wireBytes: Uint8Array,
+    username?: string,
+    displayName?: string,
+    rememberMe?: boolean,
+    authPubkey?: string,
+    kdfSalt?: string,
+  ): Promise<{ session_token: string; user_id?: string; identity_hash?: string }>;
   verify(identityHash: string, challengeId: string, signature: string, sessionPublicKey: string, sessionSignature: string, sessionExpiresAt: number, rememberMe?: boolean): Promise<{ session_token: string; user_id?: string; identity_hash?: string }>;
+  getKdfParams?(username: string): Promise<KdfParamsDTO>;
   getWSTicket(): Promise<{ ticket: string }>;
   listSessions(): Promise<SessionDTO[]>;
   terminateSession(sessionId: string): Promise<void>;
@@ -60,6 +75,9 @@ export interface CryptoPort {
   deriveVaultKey(username: string, password: string): Promise<void>;
   vaultEncrypt(plaintext: string): Promise<{ ciphertextHex: string; ivHex: string }>;
   vaultDecrypt(ciphertextHex: string, ivHex: string): Promise<{ plaintext: string }>;
+  deriveStage1aKeys?(password: string, saltHexOrB64?: string): Promise<{ authPubkey: string; salt: string; recoveryKeyHex: string }>;
+  sealZKVault?(payload: ZeroKnowledgeVaultPayload, version: number): Promise<{ ciphertextHex: string; signatureHex: string }>;
+  openZKVault?(ciphertextHex: string, signatureHex: string, version: number, userId: string): Promise<ZeroKnowledgeVaultPayload>;
   allocateSequence(): Promise<{ sequence: string }>;
   setOutgoingSequence?(sequence: string): Promise<{ sequence: string }>;
   persistKeys?(): Promise<void>;
@@ -371,4 +389,47 @@ export interface VaultArchivePort {
   download(monthYear: string): Promise<ArrayBuffer>;
   upload(monthYear: string, ciphertext: Uint8Array, hash: string, schemaVersion?: number): Promise<void>;
 }
+
+// ─── Zero-Knowledge Vault Port (Stage 1a) ──────────────────────
+export interface ZeroKnowledgeVaultPayload {
+  schema_version: 1;
+  user_id: string;
+  username: string;
+  identity_keys: {
+    id_sign_pk: string;
+    id_sign_sk: string;
+    id_dh_pk: string;
+    id_dh_sk: string;
+  };
+  devices: Array<{
+    device_id: string;
+    label: string;
+    created_at: number;
+    last_seen_at: number;
+  }>;
+  conversation_epochs: Record<string, {
+    epoch_number: number;
+    epoch_key: string;
+  }>;
+  pinned_identities: Record<string, {
+    pinned_pubkey: string;
+    pinned_at: number;
+    verified: boolean;
+  }>;
+  recovery_skipped: boolean;
+}
+
+export interface ZKVaultDTO {
+  user_id: string;
+  version: number;
+  ciphertext: string;
+  signature: string;
+  updated_at: number;
+}
+
+export interface ZKVaultPort {
+  getVault(): Promise<ZKVaultDTO | null>;
+  saveVault(expectedVersion: number, ciphertextHex: string, signatureHex: string): Promise<ZKVaultDTO>;
+}
+
 

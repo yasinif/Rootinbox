@@ -13,7 +13,8 @@ export type {
   UserPort, UserSearchResult, UserProfile, ContactPort, ContactDTO,
   ConversationMemberDTO, GroupMessageDTO, CreateGroupParams,
   UnreadPort, VaultArchivePort, VaultMeta, HistoryItemDTO,
-  SessionDTO, DeliveryAckDTO,
+  SessionDTO, DeliveryAckDTO, KdfParamsDTO, ZKVaultDTO, ZKVaultPort,
+  ZeroKnowledgeVaultPayload,
 } from './ports';
 export { encodeRoutingId, hexToBase64StdPadded, base64StdToHex, generateUUID } from './encoding';
 export { toMillis } from './timestamp';
@@ -24,6 +25,7 @@ export * from './media';
 export * from './protocol';
 export * from './errors';
 export * from './passcode';
+export * from './entropy';
 export type {
   CallSignalTransport, CallRepository, CallStateProbe, CallRestClient,
   CallMediaSession, CallMediaSessionFactory, CallMediaSessionCallbacks, CallCryptoPort,

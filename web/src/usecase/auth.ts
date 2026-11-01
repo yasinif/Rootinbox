@@ -6,7 +6,14 @@
  * Auth failures: single uniform message (no detail leak).
  */
 
-import type { AuthPort, CryptoPort, MetadataPort, SessionDTO } from '../domain';
+import type {
+  AuthPort,
+  CryptoPort,
+  MetadataPort,
+  SessionDTO,
+  ZKVaultPort,
+  ZeroKnowledgeVaultPayload,
+} from '../domain';
 
 export type AuthState = 'idle' | 'loading' | 'authenticated' | 'locked' | 'error';
 
@@ -26,6 +33,7 @@ export class AuthUseCase {
   private authPort: AuthPort;
   private cryptoPort: CryptoPort;
   private metadataPort: MetadataPort;
+  private zkVaultPort?: ZKVaultPort;
   private onBeforeLogout?: () => Promise<void>;
   private listeners = new Set<AuthStateListener>();
   private snapshot: AuthStateSnapshot = {
@@ -35,10 +43,16 @@ export class AuthUseCase {
     error: null,
   };
 
-  constructor(authPort: AuthPort, cryptoPort: CryptoPort, metadataPort: MetadataPort) {
+  constructor(
+    authPort: AuthPort,
+    cryptoPort: CryptoPort,
+    metadataPort: MetadataPort,
+    zkVaultPort?: ZKVaultPort,
+  ) {
     this.authPort = authPort;
     this.cryptoPort = cryptoPort;
     this.metadataPort = metadataPort;
+    this.zkVaultPort = zkVaultPort;
   }
 
   setBeforeLogoutHook(hook: () => Promise<void>): void {
@@ -136,6 +150,21 @@ export class AuthUseCase {
       // 1b. Derive Vault Key (Argon2id with username || 'VAULT').
       await this.cryptoPort.deriveVaultKey(username, password);
 
+      // Stage 1a: Derive KDF master seed, auth keypair, vault key, recovery key
+      let authPubkey: string | undefined;
+      let kdfSalt: string | undefined;
+      let recoveryKeyHex: string | undefined;
+      if (this.cryptoPort.deriveStage1aKeys) {
+        try {
+          const keys = await this.cryptoPort.deriveStage1aKeys(password);
+          authPubkey = keys.authPubkey;
+          kdfSalt = keys.salt;
+          recoveryKeyHex = keys.recoveryKeyHex;
+        } catch (err) {
+          console.warn('[AuthUseCase] deriveStage1aKeys failed:', err);
+        }
+      }
+
       // 1c. Remember Keys (RFC-0003 §8.3): Persist keys wrapped with non-extractable AES-GCM wrapping key
       // If rememberMe is true, persist keys in IndexedDB keyring; if false, ensure keyring is cleared.
       if (rememberMe) {
@@ -165,7 +194,9 @@ export class AuthUseCase {
       const { wireBytes } = await this.cryptoPort.buildRegistrationWire(session.publicKey, expiresAt);
 
       // 4. Register with server (raw binary POST, application/octet-stream).
-      const result = await this.authPort.register(wireBytes, username, displayName, rememberMe);
+      const result = authPubkey && kdfSalt
+        ? await this.authPort.register(wireBytes, username, displayName, rememberMe, authPubkey, kdfSalt)
+        : await this.authPort.register(wireBytes, username, displayName, rememberMe);
 
       // 5. Persist session info.
       if (rememberMe) {
@@ -209,6 +240,42 @@ export class AuthUseCase {
         await this.metadataPort.delete('session_keyring');
       }
 
+      // Stage 1a: Initialize and save initial Zero-Knowledge Vault (version 1)
+      if (result.user_id && this.zkVaultPort && this.cryptoPort.sealZKVault) {
+        try {
+          const initialPayload: ZeroKnowledgeVaultPayload = {
+            schema_version: 1,
+            user_id: result.user_id,
+            username,
+            identity_keys: {
+              id_sign_pk: identity.publicKey,
+              id_sign_sk: '',
+              id_dh_pk: '',
+              id_dh_sk: '',
+            },
+            devices: [
+              {
+                device_id: 'default',
+                label: 'Web Device',
+                created_at: Date.now(),
+                last_seen_at: Date.now(),
+              },
+            ],
+            conversation_epochs: {},
+            pinned_identities: {},
+            recovery_skipped: false,
+          };
+          const sealed = await this.cryptoPort.sealZKVault(initialPayload, 1);
+          await this.zkVaultPort.saveVault(0, sealed.ciphertextHex, sealed.signatureHex);
+          await this.metadataPort.set('last_seen_vault_version', '1');
+          if (recoveryKeyHex) {
+            await this.metadataPort.set('pending_recovery_key', recoveryKeyHex);
+          }
+        } catch (err) {
+          console.warn('[AuthUseCase] initial zkVault upload best-effort failed:', err);
+        }
+      }
+
       this.emit({
         state: 'authenticated',
         identityHash: identity.identityHash,
@@ -237,6 +304,18 @@ export class AuthUseCase {
   async login(username: string, password: string, rememberMe = true): Promise<void> {
     this.emit({ state: 'loading', error: null });
     try {
+      // Stage 1a: Pre-Auth KDF parameters
+      if (this.authPort.getKdfParams && this.cryptoPort.deriveStage1aKeys) {
+        try {
+          const kdfParams = await this.authPort.getKdfParams(username);
+          if (kdfParams && kdfParams.salt) {
+            await this.cryptoPort.deriveStage1aKeys(password, kdfParams.salt);
+          }
+        } catch (err) {
+          console.warn('[AuthUseCase] getKdfParams best-effort failed:', err);
+        }
+      }
+
       // 1. Init crypto worker (derive identity key).
       const identity = await this.cryptoPort.init(username, password);
 
@@ -362,6 +441,27 @@ export class AuthUseCase {
         await this.metadataPort.delete('session_token');
         await this.metadataPort.delete('active_session_keypair');
         await this.metadataPort.delete('session_keyring');
+      }
+
+      // Stage 1a: Download, verify, and decrypt Zero-Knowledge Vault
+      if (result.user_id && this.zkVaultPort && this.cryptoPort.openZKVault) {
+        try {
+          const vault = await this.zkVaultPort.getVault();
+          if (vault) {
+            const lastSeen = await this.metadataPort.get('last_seen_vault_version');
+            if (lastSeen) {
+              const lastVer = parseInt(lastSeen, 10);
+              if (!isNaN(lastVer) && vault.version < lastVer) {
+                console.error('[AuthUseCase] Vault rollback detected! Server version:', vault.version, 'Local version:', lastVer);
+                throw new Error('Server rollback detected: vault version is older than local version');
+              }
+            }
+            await this.cryptoPort.openZKVault(vault.ciphertext, vault.signature, vault.version, vault.user_id);
+            await this.metadataPort.set('last_seen_vault_version', String(vault.version));
+          }
+        } catch (err) {
+          console.warn('[AuthUseCase] vault sync best-effort failed:', err);
+        }
       }
 
       this.emit({

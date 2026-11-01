@@ -18,7 +18,7 @@ import {
   createCryptoPort, createAuthPort, createMessagePort,
   createOutboxPort, createConversationPort, createDirectoryPort,
   createMetadataPort, createUserPort, createContactPort, createUnreadPort,
-  createVaultArchivePort,
+  createVaultArchivePort, createZKVaultPort,
   WSClient, setSessionInvalidatedCallback, setAuthToken,
 } from './infrastructure/adapters';
 import { AuthUseCase } from './usecase/auth';
@@ -133,7 +133,8 @@ const receiveSignalUC = new ReceiveCallSignalUseCase(
 const pendingCallUC = new PendingCallUseCase(callsHttpClient, receiveSignalUC);
 
 // ─── Create Use Cases ───────────────────────────────────────
-const authUC = new AuthUseCase(authPort, cryptoPort, metadataPort);
+const zkVaultPort = createZKVaultPort();
+const authUC = new AuthUseCase(authPort, cryptoPort, metadataPort, zkVaultPort);
 const chatUC = new ChatUseCase(cryptoPort, messagePort, outboxPort, conversationPort, directoryPort, metadataPort, unreadPort);
 
 if (import.meta.env.VITE_E2E === 'true' && typeof window !== 'undefined') {
