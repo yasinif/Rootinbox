@@ -1,7 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
+import { randomTestUsername } from '../test-random';
 
 async function registerUser(page: Page, prefix: string): Promise<string> {
-  const username = `${prefix}_${Math.random().toString(36).substring(2, 9)}`;
+  const username = randomTestUsername(prefix, 7);
   await page.goto('/');
 
   const chatScreen = page.locator('#chat-screen');
