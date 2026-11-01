@@ -28,6 +28,11 @@ type userModel struct {
 	AvatarMime      *string `db:"avatar_mime"`
 	AvatarUpdatedAt *int64  `db:"avatar_updated_at"`
 	LastSeenAt      int64   `db:"last_seen_at"`
+	AuthPubkey      *string `db:"auth_pubkey"`
+	KDFSalt         *string `db:"kdf_salt"`
+	KDFMemoryKiB    int     `db:"kdf_memory_kib"`
+	KDFIterations   int     `db:"kdf_iterations"`
+	KDFParallelism  int     `db:"kdf_parallelism"`
 	Status          string  `db:"status"`
 	CreatedAt       int64   `db:"created_at"`
 	StatusUpdatedAt *int64  `db:"status_updated_at"`
@@ -45,6 +50,11 @@ func (m *userModel) toDomain() *domain.User {
 		AvatarMime:      m.AvatarMime,
 		AvatarUpdatedAt: m.AvatarUpdatedAt,
 		LastSeenAt:      m.LastSeenAt,
+		AuthPubkey:      m.AuthPubkey,
+		KDFSalt:         m.KDFSalt,
+		KDFMemoryKiB:    m.KDFMemoryKiB,
+		KDFIterations:   m.KDFIterations,
+		KDFParallelism:  m.KDFParallelism,
 		Status:          domain.UserStatus(m.Status),
 		CreatedAt:       m.CreatedAt,
 	}
@@ -81,9 +91,19 @@ func (r *SQLiteUserRepository) getReader(ctx context.Context) sqlx.ExtContext {
 // RFC-0001A §3: Repositories MUST pass context.Context unchanged to every database operation.
 func (r *SQLiteUserRepository) Create(ctx context.Context, user *domain.User) error {
 	db := r.getWriter(ctx)
+	if user.KDFMemoryKiB == 0 {
+		user.KDFMemoryKiB = 32768
+	}
+	if user.KDFIterations == 0 {
+		user.KDFIterations = 4
+	}
+	if user.KDFParallelism == 0 {
+		user.KDFParallelism = 1
+	}
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO users (id, identity_hash, public_key, username, display_name, last_name, bio, status, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO users (id, identity_hash, public_key, username, display_name, last_name, bio, status, created_at, last_seen_at, auth_pubkey, kdf_salt, kdf_memory_kib, kdf_iterations, kdf_parallelism) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		user.ID, user.IdentityHash, user.PublicKey, user.Username, user.DisplayName, user.LastName, user.Bio, string(user.Status), user.CreatedAt, user.LastSeenAt,
+		user.AuthPubkey, user.KDFSalt, user.KDFMemoryKiB, user.KDFIterations, user.KDFParallelism,
 	)
 	if err != nil {
 		// RFC-0001A §4.3: infrastructure MAY wrap low-level errors.
@@ -96,7 +116,7 @@ func (r *SQLiteUserRepository) Create(ctx context.Context, user *domain.User) er
 func (r *SQLiteUserRepository) GetByID(ctx context.Context, id string) (*domain.User, error) {
 	db := r.getReader(ctx)
 	var m userModel
-	err := sqlx.GetContext(ctx, db, &m, "SELECT id, identity_hash, public_key, username, display_name, last_name, bio, avatar_mime, avatar_updated_at, last_seen_at, status, created_at FROM users WHERE id = ?", id)
+	err := sqlx.GetContext(ctx, db, &m, "SELECT id, identity_hash, public_key, username, display_name, last_name, bio, avatar_mime, avatar_updated_at, last_seen_at, status, created_at, auth_pubkey, kdf_salt, kdf_memory_kib, kdf_iterations, kdf_parallelism FROM users WHERE id = ?", id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, domain.NewDomainError(domain.ErrUsr001, "user not found", nil)
@@ -111,7 +131,7 @@ func (r *SQLiteUserRepository) GetByID(ctx context.Context, id string) (*domain.
 func (r *SQLiteUserRepository) GetByIdentityHash(ctx context.Context, hash string) (*domain.User, error) {
 	db := r.getReader(ctx)
 	var m userModel
-	err := sqlx.GetContext(ctx, db, &m, "SELECT id, identity_hash, public_key, username, display_name, last_name, bio, avatar_mime, avatar_updated_at, last_seen_at, status, created_at FROM users WHERE identity_hash = ?", hash)
+	err := sqlx.GetContext(ctx, db, &m, "SELECT id, identity_hash, public_key, username, display_name, last_name, bio, avatar_mime, avatar_updated_at, last_seen_at, status, created_at, auth_pubkey, kdf_salt, kdf_memory_kib, kdf_iterations, kdf_parallelism FROM users WHERE identity_hash = ?", hash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, domain.NewDomainError(domain.ErrUsr001, "user not found", nil)
@@ -179,7 +199,7 @@ func (r *SQLiteUserRepository) UpdateUsername(ctx context.Context, id string, us
 func (r *SQLiteUserRepository) GetByUsername(ctx context.Context, username string) (*domain.User, error) {
 	db := r.getReader(ctx)
 	var m userModel
-	err := sqlx.GetContext(ctx, db, &m, "SELECT id, identity_hash, public_key, username, display_name, last_name, bio, avatar_mime, avatar_updated_at, last_seen_at, status, created_at FROM users WHERE username = ?", username)
+	err := sqlx.GetContext(ctx, db, &m, "SELECT id, identity_hash, public_key, username, display_name, last_name, bio, avatar_mime, avatar_updated_at, last_seen_at, status, created_at, auth_pubkey, kdf_salt, kdf_memory_kib, kdf_iterations, kdf_parallelism FROM users WHERE username = ?", username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, domain.NewDomainError(domain.ErrUsr001, "user not found", nil)
@@ -195,7 +215,7 @@ func (r *SQLiteUserRepository) SearchByUsername(ctx context.Context, query strin
 	db := r.getReader(ctx)
 	var models []userModel
 	err := sqlx.SelectContext(ctx, db, &models,
-		"SELECT id, identity_hash, public_key, username, display_name, last_name, bio, avatar_mime, avatar_updated_at, last_seen_at, status, created_at FROM users WHERE username LIKE ? AND status = ? ORDER BY username ASC LIMIT ?",
+		"SELECT id, identity_hash, public_key, username, display_name, last_name, bio, avatar_mime, avatar_updated_at, last_seen_at, status, created_at, auth_pubkey, kdf_salt, kdf_memory_kib, kdf_iterations, kdf_parallelism FROM users WHERE username LIKE ? AND status = ? ORDER BY username ASC LIMIT ?",
 		query+"%", string(domain.UserStatusActive), limit,
 	)
 	if err != nil {
@@ -254,6 +274,26 @@ func (r *SQLiteUserRepository) UpdateLastSeen(ctx context.Context, id string, ti
 	rows, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("checking rows affected on update last seen: %w", err)
+	}
+	if rows == 0 {
+		return domain.NewDomainError(domain.ErrUsr001, "user not found", nil)
+	}
+	return nil
+}
+
+// UpdateAuthCredentials updates the user's decoupled auth public key and KDF parameters.
+func (r *SQLiteUserRepository) UpdateAuthCredentials(ctx context.Context, id string, authPubkey, kdfSalt string, memoryKiB, iterations, parallelism int) error {
+	db := r.getWriter(ctx)
+	res, err := db.ExecContext(ctx,
+		"UPDATE users SET auth_pubkey = ?, kdf_salt = ?, kdf_memory_kib = ?, kdf_iterations = ?, kdf_parallelism = ? WHERE id = ?",
+		authPubkey, kdfSalt, memoryKiB, iterations, parallelism, id,
+	)
+	if err != nil {
+		return fmt.Errorf("updating auth credentials: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking rows affected on update auth credentials: %w", err)
 	}
 	if rows == 0 {
 		return domain.NewDomainError(domain.ErrUsr001, "user not found", nil)

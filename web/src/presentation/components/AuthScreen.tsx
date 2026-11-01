@@ -8,6 +8,7 @@
 import { useState, useEffect } from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth, usePwaInstall } from '../hooks';
+import { estimatePassphraseEntropy } from '../../domain';
 import { InstallModal } from './common/InstallModal';
 
 export function AuthScreen() {
@@ -221,6 +222,23 @@ export function AuthScreen() {
               required
               autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
             />
+            {mode === 'register' && password.length > 0 && (
+              <span
+                id="auth-password-strength"
+                className="auth-hint"
+                style={{
+                  color: estimatePassphraseEntropy(password).isStrong
+                    ? '#16a34a'
+                    : '#d97706',
+                  marginTop: '4px',
+                  display: 'block',
+                }}
+              >
+                {estimatePassphraseEntropy(password).isStrong
+                  ? `Strong passphrase (~${estimatePassphraseEntropy(password).bits} bits entropy)`
+                  : (estimatePassphraseEntropy(password).feedback || 'Passphrase too weak')}
+              </span>
+            )}
           </div>
 
           <div className="auth-checkbox-group">
