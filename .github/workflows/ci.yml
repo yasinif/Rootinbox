@@ -20,6 +20,7 @@ jobs:
   go:
     name: Go Verification
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,6 +66,7 @@ jobs:
   web:
     name: Web Verification
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,6 +110,7 @@ jobs:
   zk-audit:
     name: Zero-Knowledge Forensic Audit (A2 Baseline)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -143,6 +146,7 @@ jobs:
   docker:
     name: Docker Build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,7 +160,7 @@ jobs:
   e2e:
     name: E2E Playwright Tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -267,6 +271,7 @@ jobs:
   vapid-migration:
     name: VAPID Migration & Rollback
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout PR branch
@@ -315,6 +320,7 @@ jobs:
   bundle:
     name: Offline Deployment Bundle
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -359,6 +365,7 @@ jobs:
   tls-proof:
     name: Real-Browser TLS Proof (H6)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: [bundle]
     steps:
       - name: Checkout repository
@@ -495,6 +502,7 @@ jobs:
   relocation:
     name: Server Relocation Test Harness (A3 Baseline)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -556,6 +564,7 @@ jobs:
   isolation-drill:
     name: Air-Gapped Isolation & Resource Gates Drill (Part D)
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: [bundle]
     steps:
       - name: Checkout repository
@@ -583,6 +592,7 @@ jobs:
   gate:
     name: CI Gate
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     if: always()
     needs:
       - go

@@ -13,10 +13,11 @@ import (
 // VaultUseCase implements business logic for vault operations.
 // RFC-0006 §4.3: Vault Archival Lifecycle.
 type VaultUseCase struct {
-	vaultRepo domain.VaultRepository
-	clock     domain.Clock
-	uuidGen   domain.UUIDGenerator
-	logger    domain.Logger
+	vaultRepo   domain.VaultRepository
+	zkVaultRepo domain.ZKVaultRepository
+	clock       domain.Clock
+	uuidGen     domain.UUIDGenerator
+	logger      domain.Logger
 }
 
 // NewVaultUseCase creates a new VaultUseCase.
@@ -32,6 +33,11 @@ func NewVaultUseCase(
 		uuidGen:   uuidGen,
 		logger:    logger,
 	}
+}
+
+// SetZKVaultRepo injects the ZKVaultRepository into VaultUseCase.
+func (uc *VaultUseCase) SetZKVaultRepo(r domain.ZKVaultRepository) {
+	uc.zkVaultRepo = r
 }
 
 // UploadVault stages, validates, and persists a vault.
@@ -106,4 +112,39 @@ func (uc *VaultUseCase) ListVaults(ctx context.Context, userID string) ([]*domai
 		return nil, fmt.Errorf("listing vaults: %w", err)
 	}
 	return vaults, nil
+}
+
+// GetZKVault retrieves the Zero-Knowledge Vault for a user.
+// RFC Stage 1a: GET /api/v1/vault/current
+func (uc *VaultUseCase) GetZKVault(ctx context.Context, userID string) (*domain.ZKVault, error) {
+	if uc.zkVaultRepo == nil {
+		return nil, domain.NewDomainError(domain.ErrSys500, "zk vault repo not configured", nil)
+	}
+	return uc.zkVaultRepo.GetByUserID(ctx, userID)
+}
+
+// SaveZKVault saves or updates a Zero-Knowledge Vault with optimistic concurrency control.
+// RFC Stage 1a: PUT /api/v1/vault/current
+func (uc *VaultUseCase) SaveZKVault(ctx context.Context, userID string, expectedVersion int, ciphertext []byte, signature string) (*domain.ZKVault, error) {
+	if uc.zkVaultRepo == nil {
+		return nil, domain.NewDomainError(domain.ErrSys500, "zk vault repo not configured", nil)
+	}
+	if len(ciphertext) == 0 {
+		return nil, domain.NewDomainError(domain.ErrSys001, "ciphertext cannot be empty", nil)
+	}
+	if signature == "" {
+		return nil, domain.NewDomainError(domain.ErrSys001, "signature cannot be empty", nil)
+	}
+
+	vault := &domain.ZKVault{
+		UserID:     userID,
+		Ciphertext: ciphertext,
+		Signature:  signature,
+		UpdatedAt:  uc.clock.NowUnix(),
+	}
+
+	if err := uc.zkVaultRepo.Save(ctx, vault, expectedVersion); err != nil {
+		return nil, err
+	}
+	return vault, nil
 }
