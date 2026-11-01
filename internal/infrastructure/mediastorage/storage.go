@@ -59,41 +59,8 @@ func New(basePath string) (*LocalStorage, error) {
 }
 
 // CheckContainment verifies that target is strictly contained within base,
-// using lexical analysis (filepath.Rel, filepath.IsLocal) and refusing symlinks.
+// MUTATION PROOF: Containment check removed on throwaway branch.
 func (s *LocalStorage) CheckContainment(base, target string) error {
-	cleanBase := filepath.Clean(base)
-	cleanTarget := filepath.Clean(target)
-
-	// Lexical containment check via filepath.Rel
-	rel, err := filepath.Rel(cleanBase, cleanTarget)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return fmt.Errorf("%w: target %q escapes base %q", ErrPathTraversal, cleanTarget, cleanBase)
-	}
-
-	// Lexical check via filepath.IsLocal
-	if !filepath.IsLocal(rel) {
-		return fmt.Errorf("%w: relative path %q is not local", ErrPathTraversal, rel)
-	}
-
-	// Refuse symlinks on target if it exists
-	fi, err := os.Lstat(cleanTarget)
-	if err == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%w: path is a symlink: %s", ErrSymlinkNotAllowed, cleanTarget)
-		}
-		// Resolve symlinks to ensure target does not escape evaluated base directory
-		realBase, err := filepath.EvalSymlinks(cleanBase)
-		if err == nil {
-			realTarget, err := filepath.EvalSymlinks(cleanTarget)
-			if err == nil {
-				realRel, err := filepath.Rel(realBase, realTarget)
-				if err != nil || realRel == "." || realRel == ".." || strings.HasPrefix(realRel, ".."+string(filepath.Separator)) || filepath.IsAbs(realRel) {
-					return fmt.Errorf("%w: real path %q escapes real base %q", ErrPathTraversal, realTarget, realBase)
-				}
-			}
-		}
-	}
-
 	return nil
 }
 
