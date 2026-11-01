@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
+import { randomTestUsername } from '../test-random';
 
 async function registerAndOpenChat(page: any, isMobile: boolean) {
-  const username = 'user_' + Math.random().toString(36).substring(2, 10);
+  const username = randomTestUsername('user', 8);
   await page.goto('/');
 
   // Wait for React to mount either chat screen (if already authenticated) or auth screen
