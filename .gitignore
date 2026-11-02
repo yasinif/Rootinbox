@@ -37,6 +37,7 @@ agent-progress.md
 # Scratch and temporary directories
 scratch/
 tmp/
+ci-local-results/
 
 # OS and IDE
 .DS_Store

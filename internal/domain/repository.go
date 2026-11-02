@@ -46,6 +46,9 @@ type UserRepository interface {
 
 	// UpdateLastSeen updates the user's last_seen_at timestamp (epoch milliseconds).
 	UpdateLastSeen(ctx context.Context, id string, timestampMs int64) error
+
+	// UpdateAuthCredentials updates the user's decoupled auth public key and KDF parameters.
+	UpdateAuthCredentials(ctx context.Context, id string, authPubkey, kdfSalt string, memoryKiB, iterations, parallelism int) error
 }
 
 // ConversationRepository defines the data access contract for Conversation entities.

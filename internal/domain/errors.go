@@ -55,6 +55,9 @@ const (
 	// RFC-0006 §6 (F2): SHA-256 hash verification against X-Vault-Hash.
 	ErrVault002 ErrorCode = "VAULT_002"
 
+	// ErrVault003 indicates a vault was not found.
+	ErrVault003 ErrorCode = "VAULT_003"
+
 	// Phase 7 error codes (RFC-0007 media).
 
 	// ErrMedia001 indicates a media file not found.

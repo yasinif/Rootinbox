@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"rootinbox/internal/domain"
 	"rootinbox/internal/usecase"
 )
 
@@ -52,6 +53,11 @@ func (h *MediaHandler) HandleInit() http.HandlerFunc {
 			return
 		}
 
+		if err := domain.ValidateFileID(req.FileID); err != nil {
+			WriteError(w, http.StatusBadRequest, "SYS_001", "invalid file_id format")
+			return
+		}
+
 		file, err := h.mediaUC.Init(r.Context(), userID, req.FileID, req.TotalChunks, req.TokenHash)
 		if err != nil {
 			WriteDomainError(w, err)
@@ -81,6 +87,11 @@ func (h *MediaHandler) HandleUploadChunk() http.HandlerFunc {
 		chunkIndexStr := r.PathValue("chunk_index")
 		if fileID == "" || chunkIndexStr == "" {
 			WriteError(w, http.StatusBadRequest, "SYS_001", "file_id and chunk_index are required")
+			return
+		}
+
+		if err := domain.ValidateFileID(fileID); err != nil {
+			WriteError(w, http.StatusBadRequest, "SYS_001", "invalid file_id format")
 			return
 		}
 
@@ -136,6 +147,11 @@ func (h *MediaHandler) HandleFinalize() http.HandlerFunc {
 			return
 		}
 
+		if err := domain.ValidateFileID(fileID); err != nil {
+			WriteError(w, http.StatusBadRequest, "SYS_001", "invalid file_id format")
+			return
+		}
+
 		var req finalizeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			WriteError(w, http.StatusBadRequest, "SYS_001", "invalid request body")
@@ -177,6 +193,11 @@ func (h *MediaHandler) HandleDownloadChunk() http.HandlerFunc {
 			return
 		}
 
+		if err := domain.ValidateFileID(fileID); err != nil {
+			WriteError(w, http.StatusBadRequest, "SYS_001", "invalid file_id format")
+			return
+		}
+
 		chunkIndex, err := strconv.Atoi(chunkIndexStr)
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, "SYS_001", "invalid chunk_index")
@@ -203,6 +224,11 @@ func (h *MediaHandler) HandleDelete() http.HandlerFunc {
 		fileID := r.PathValue("file_id")
 		if fileID == "" {
 			WriteError(w, http.StatusBadRequest, "SYS_001", "file_id is required")
+			return
+		}
+
+		if err := domain.ValidateFileID(fileID); err != nil {
+			WriteError(w, http.StatusBadRequest, "SYS_001", "invalid file_id format")
 			return
 		}
 

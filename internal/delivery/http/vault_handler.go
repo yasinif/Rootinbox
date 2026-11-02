@@ -1,9 +1,14 @@
 package http
 
 import (
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"rootinbox/internal/usecase"
 )
@@ -154,5 +159,94 @@ func (h *VaultHandler) HandleList() http.HandlerFunc {
 		}
 
 		WriteSuccess(w, http.StatusOK, resp, nil)
+	}
+}
+
+type putZKVaultRequest struct {
+	ExpectedVersion *int   `json:"expected_version"`
+	Ciphertext      string `json:"ciphertext"` // hex or base64 string
+	Signature       string `json:"signature"`  // hex signature
+}
+
+// HandleGetZKVault handles GET /api/v1/vault/current.
+// RFC Stage 1a: Returns the user's Zero-Knowledge Vault with ETag.
+func (h *VaultHandler) HandleGetZKVault() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := userIDFromRequest(r)
+		if !ok {
+			WriteError(w, http.StatusUnauthorized, "AUTH_001", "authentication required")
+			return
+		}
+
+		vault, err := h.vaultUC.GetZKVault(r.Context(), userID)
+		if err != nil {
+			WriteDomainError(w, err)
+			return
+		}
+
+		w.Header().Set("ETag", fmt.Sprintf("\"%d\"", vault.Version))
+		WriteSuccess(w, http.StatusOK, map[string]any{
+			"user_id":    vault.UserID,
+			"version":    vault.Version,
+			"ciphertext": hex.EncodeToString(vault.Ciphertext),
+			"signature":  vault.Signature,
+			"updated_at": vault.UpdatedAt,
+		}, nil)
+	}
+}
+
+// HandlePutZKVault handles PUT /api/v1/vault/current.
+// RFC Stage 1a: Updates the user's Zero-Knowledge Vault with optimistic concurrency control.
+func (h *VaultHandler) HandlePutZKVault() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := userIDFromRequest(r)
+		if !ok {
+			WriteError(w, http.StatusUnauthorized, "AUTH_001", "authentication required")
+			return
+		}
+
+		var req putZKVaultRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			WriteError(w, http.StatusBadRequest, "SYS_001", "invalid request body")
+			return
+		}
+
+		expectedVersion := 0
+		if ifMatch := r.Header.Get("If-Match"); ifMatch != "" {
+			trimmed := strings.Trim(ifMatch, "\" ")
+			if v, err := strconv.Atoi(trimmed); err == nil && v >= 0 {
+				expectedVersion = v
+			}
+		} else if req.ExpectedVersion != nil {
+			expectedVersion = *req.ExpectedVersion
+		}
+
+		ciphertextBytes, err := hex.DecodeString(req.Ciphertext)
+		if err != nil {
+			// Try base64 fallback
+			if b64Bytes, b64Err := base64.RawURLEncoding.DecodeString(req.Ciphertext); b64Err == nil {
+				ciphertextBytes = b64Bytes
+			} else if stdBytes, stdErr := base64.StdEncoding.DecodeString(req.Ciphertext); stdErr == nil {
+				ciphertextBytes = stdBytes
+			} else {
+				WriteError(w, http.StatusBadRequest, "SYS_001", "invalid ciphertext encoding (must be hex or base64)")
+				return
+			}
+		}
+
+		vault, err := h.vaultUC.SaveZKVault(r.Context(), userID, expectedVersion, ciphertextBytes, req.Signature)
+		if err != nil {
+			WriteDomainError(w, err)
+			return
+		}
+
+		w.Header().Set("ETag", fmt.Sprintf("\"%d\"", vault.Version))
+		WriteSuccess(w, http.StatusOK, map[string]any{
+			"user_id":    vault.UserID,
+			"version":    vault.Version,
+			"ciphertext": hex.EncodeToString(vault.Ciphertext),
+			"signature":  vault.Signature,
+			"updated_at": vault.UpdatedAt,
+		}, nil)
 	}
 }

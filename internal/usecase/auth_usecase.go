@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -56,24 +57,85 @@ type ChallengeResult struct {
 	ExpiresIn   int    // TTL in seconds.
 }
 
+// KDFParamsResult holds KDF configuration parameters.
+type KDFParamsResult struct {
+	Salt        string `json:"salt"`
+	Iterations  int    `json:"iterations"`
+	MemoryKiB   int    `json:"memory_kib"`
+	Parallelism int    `json:"parallelism"`
+}
+
 // AuthUseCase implements authentication business logic.
 // RFC-0004: Challenge-Response authentication with Ed25519.
 type AuthUseCase struct {
-	userRepo   domain.UserRepository
-	sessionRepo domain.SessionRepository
-	nonceStore domain.NonceStore
-	ticketStore domain.TicketStore
-	txManager  domain.TransactionManager
-	clock      domain.Clock
-	uuidGen    domain.UUIDGenerator
+	userRepo          domain.UserRepository
+	sessionRepo       domain.SessionRepository
+	nonceStore        domain.NonceStore
+	ticketStore       domain.TicketStore
+	txManager         domain.TransactionManager
+	clock             domain.Clock
+	uuidGen           domain.UUIDGenerator
 	logger            domain.Logger
 	auditor           domain.SecurityAuditor
 	sessionTerminator domain.SessionTerminator
+	serverSaltSecret  []byte
 }
 
 // SetSessionTerminator configures the session terminator for WebSocket disconnections.
 func (uc *AuthUseCase) SetSessionTerminator(t domain.SessionTerminator) {
 	uc.sessionTerminator = t
+}
+
+// SetServerSaltSecret configures the server salt secret for anti-enumeration fake salts.
+func (uc *AuthUseCase) SetServerSaltSecret(secret []byte) {
+	uc.serverSaltSecret = secret
+}
+
+// GetKDFParams returns Argon2id parameters for a user or a deterministic fake salt.
+// RFC Stage 1a: GET /api/v1/auth/kdf-params?username=...
+func (uc *AuthUseCase) GetKDFParams(ctx context.Context, username string) (*KDFParamsResult, error) {
+	canonical := strings.ToLower(strings.TrimSpace(username))
+	if canonical == "" {
+		return nil, domain.NewDomainError(domain.ErrUsr004, "username is required", nil)
+	}
+
+	user, err := uc.userRepo.GetByUsername(ctx, canonical)
+	if err == nil && user != nil && user.KDFSalt != nil && *user.KDFSalt != "" {
+		mem := user.KDFMemoryKiB
+		if mem == 0 {
+			mem = 32768
+		}
+		iter := user.KDFIterations
+		if iter == 0 {
+			iter = 4
+		}
+		par := user.KDFParallelism
+		if par == 0 {
+			par = 1
+		}
+		return &KDFParamsResult{
+			Salt:        *user.KDFSalt,
+			Iterations:  iter,
+			MemoryKiB:   mem,
+			Parallelism: par,
+		}, nil
+	}
+
+	// Unknown user (or user without salt): generate deterministic fake salt
+	secret := uc.serverSaltSecret
+	if len(secret) == 0 {
+		secret = []byte("rootinbox-default-anti-enumeration-kdf-salt-secret")
+	}
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte("kdf-salt:" + canonical))
+	fakeSalt := hex.EncodeToString(mac.Sum(nil)[:16])
+
+	return &KDFParamsResult{
+		Salt:        fakeSalt,
+		Iterations:  4,
+		MemoryKiB:   32768,
+		Parallelism: 1,
+	}, nil
 }
 
 // NewAuthUseCase creates a new AuthUseCase.
@@ -137,6 +199,20 @@ func (uc *AuthUseCase) Register(ctx context.Context, wireData []byte, optionalUs
 		}
 	}
 
+	// Validate optional auth_pubkey if provided (optionalUsername[2])
+	var authPubkeyPtr *string
+	if len(optionalUsername) > 2 && optionalUsername[2] != "" {
+		trimmed := strings.TrimSpace(optionalUsername[2])
+		authPubkeyPtr = &trimmed
+	}
+
+	// Validate optional kdf_salt if provided (optionalUsername[3])
+	var kdfSaltPtr *string
+	if len(optionalUsername) > 3 && optionalUsername[3] != "" {
+		trimmed := strings.TrimSpace(optionalUsername[3])
+		kdfSaltPtr = &trimmed
+	}
+
 	// Decode registration wire format (RFC-0003 §5.1).
 	var wireArr [crypto.RegistrationWireSize]byte
 	copy(wireArr[:], wireData)
@@ -168,13 +244,18 @@ func (uc *AuthUseCase) Register(ctx context.Context, wireData []byte, optionalUs
 		}
 
 		user := &domain.User{
-			ID:           uc.uuidGen.New(),
-			IdentityHash: identityHashHex,
-			PublicKey:    hex.EncodeToString(identityPK[:]),
-			Username:     usernamePtr,
-			DisplayName:  displayNamePtr,
-			Status:       domain.UserStatusActive,
-			CreatedAt:    now,
+			ID:             uc.uuidGen.New(),
+			IdentityHash:   identityHashHex,
+			PublicKey:      hex.EncodeToString(identityPK[:]),
+			Username:       usernamePtr,
+			DisplayName:    displayNamePtr,
+			AuthPubkey:     authPubkeyPtr,
+			KDFSalt:        kdfSaltPtr,
+			KDFMemoryKiB:   32768,
+			KDFIterations:  4,
+			KDFParallelism: 1,
+			Status:         domain.UserStatusActive,
+			CreatedAt:      now,
 		}
 		if err := uc.userRepo.Create(txCtx, user); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE constraint failed") && strings.Contains(err.Error(), "users.username") {
@@ -245,17 +326,38 @@ func (uc *AuthUseCase) Register(ctx context.Context, wireData []byte, optionalUs
 
 // Challenge generates a nonce for the login challenge phase.
 // RFC-0004 §5.2: Login Flow Phase 1.
-func (uc *AuthUseCase) Challenge(ctx context.Context, identityHashB64 string) (*ChallengeResult, error) {
-	// Decode Base64URL identity hash.
-	identityHashBytes, err := base64.RawURLEncoding.DecodeString(identityHashB64)
-	if err != nil || len(identityHashBytes) != 32 {
+// Supports both Base64URL/Hex identity hash and canonical username.
+func (uc *AuthUseCase) Challenge(ctx context.Context, identifier string) (*ChallengeResult, error) {
+	canonical := strings.ToLower(strings.TrimSpace(identifier))
+	if canonical == "" {
 		return nil, domain.NewDomainError(domain.ErrAuth001,
 			"Authentication failed. Invalid identity, signature, or expired challenge.", nil)
 	}
-	identityHashHex := hex.EncodeToString(identityHashBytes)
+
+	var identityHashHex string
+	if b, err := base64.RawURLEncoding.DecodeString(identifier); err == nil && len(b) == 32 {
+		identityHashHex = hex.EncodeToString(b)
+	} else if b, err := hex.DecodeString(identifier); err == nil && len(b) == 32 {
+		identityHashHex = canonical
+	} else {
+		// Look up user by username
+		user, err := uc.userRepo.GetByUsername(ctx, canonical)
+		if err == nil && user != nil {
+			identityHashHex = user.IdentityHash
+		} else {
+			// Generate deterministic fake identity hash to prevent timing and enumeration leaks
+			secret := uc.serverSaltSecret
+			if len(secret) == 0 {
+				secret = []byte("rootinbox-default-anti-enumeration-kdf-salt-secret")
+			}
+			mac := hmac.New(sha256.New, secret)
+			mac.Write([]byte("fake-identity:" + canonical))
+			identityHashHex = hex.EncodeToString(mac.Sum(nil))
+		}
+	}
 
 	// Verify user exists (but don't reveal if they don't).
-	_, err = uc.userRepo.GetByIdentityHash(ctx, identityHashHex)
+	_, err := uc.userRepo.GetByIdentityHash(ctx, identityHashHex)
 	if err != nil {
 		// Still generate a nonce to prevent timing-based identity enumeration.
 		// The nonce will never be consumed, but the response looks identical.
@@ -289,15 +391,33 @@ func (uc *AuthUseCase) Challenge(ctx context.Context, identityHashB64 string) (*
 // RFC-0004 §5.3: Login Flow Phase 2.
 // Phase 12 / Task 0.5: Now requires sessionSignature + sessionExpiresAt for
 // server-side MITM prevention.
-func (uc *AuthUseCase) Verify(ctx context.Context, identityHashB64, challengeIDB64, sessionPKB64, signatureB64, sessionSignatureB64 string, sessionExpiresAt int64) (*AuthResult, error) {
+// Stage 1a: Supports authentication via AuthPubkey if configured.
+func (uc *AuthUseCase) Verify(ctx context.Context, identifier, challengeIDB64, sessionPKB64, signatureB64, sessionSignatureB64 string, sessionExpiresAt int64) (*AuthResult, error) {
 	authErr := domain.NewDomainError(domain.ErrAuth001,
 		"Authentication failed. Invalid identity, signature, or expired challenge.", nil)
 
-	// Decode all Base64URL inputs.
-	identityHashBytes, err := base64.RawURLEncoding.DecodeString(identityHashB64)
-	if err != nil || len(identityHashBytes) != 32 {
-		uc.logger.Error("Verify failed: identityHash decode error", "err", err, "len", len(identityHashBytes), "raw", identityHashB64)
-		return nil, authErr
+	var identityHashBytes []byte
+	var identityHashHex string
+
+	if b, err := base64.RawURLEncoding.DecodeString(identifier); err == nil && len(b) == 32 {
+		identityHashBytes = b
+		identityHashHex = hex.EncodeToString(b)
+	} else if b, err := hex.DecodeString(identifier); err == nil && len(b) == 32 {
+		identityHashBytes = b
+		identityHashHex = strings.ToLower(identifier)
+	} else {
+		// Look up user by username
+		user, err := uc.userRepo.GetByUsername(ctx, strings.ToLower(strings.TrimSpace(identifier)))
+		if err != nil || user == nil {
+			uc.logger.Error("Verify failed: user not found by identifier/username", "identifier", identifier)
+			return nil, authErr
+		}
+		identityHashHex = user.IdentityHash
+		hBytes, err := hex.DecodeString(user.IdentityHash)
+		if err != nil || len(hBytes) != 32 {
+			return nil, authErr
+		}
+		identityHashBytes = hBytes
 	}
 
 	challengeIDBytes, err := base64.RawURLEncoding.DecodeString(challengeIDB64)
@@ -315,18 +435,24 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identityHashB64, challengeIDB
 
 	signatureBytes, err := base64.RawURLEncoding.DecodeString(signatureB64)
 	if err != nil || len(signatureBytes) != 64 {
-		uc.logger.Error("Verify failed: signature decode error", "err", err, "len", len(signatureBytes), "raw", signatureB64)
-		return nil, authErr
+		if hexBytes, hErr := hex.DecodeString(signatureB64); hErr == nil && len(hexBytes) == 64 {
+			signatureBytes = hexBytes
+		} else {
+			uc.logger.Error("Verify failed: signature decode error", "err", err, "len", len(signatureBytes), "raw", signatureB64)
+			return nil, authErr
+		}
 	}
 
 	// Phase 12 / Task 0.5: Decode session signature (73-byte payload verification).
 	sessionSigBytes, err := base64.RawURLEncoding.DecodeString(sessionSignatureB64)
 	if err != nil || len(sessionSigBytes) != 64 {
-		uc.logger.Error("Verify failed: sessionSig decode error", "err", err, "len", len(sessionSigBytes), "raw", sessionSignatureB64)
-		return nil, authErr
+		if hexBytes, hErr := hex.DecodeString(sessionSignatureB64); hErr == nil && len(hexBytes) == 64 {
+			sessionSigBytes = hexBytes
+		} else {
+			uc.logger.Error("Verify failed: sessionSig decode error", "err", err, "len", len(sessionSigBytes), "raw", sessionSignatureB64)
+			return nil, authErr
+		}
 	}
-
-	identityHashHex := hex.EncodeToString(identityHashBytes)
 
 	// RFC-0004 §5.3: Retrieve Nonce atomically.
 	storeKey := fmt.Sprintf("AuthNonce:%s:%s", identityHashHex, challengeID)
@@ -349,27 +475,46 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identityHashB64, challengeIDB
 		return nil, authErr
 	}
 
-	// Decode user's stored public key.
+	// Decode user's stored identity public key.
 	pubKeyBytes, err := hex.DecodeString(user.PublicKey)
 	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
 		return nil, authErr
 	}
 	identityPubKey := ed25519.PublicKey(pubKeyBytes)
 
+	// Decode user's AuthPubkey if configured.
+	var authPubKey ed25519.PublicKey
+	if user.AuthPubkey != nil && *user.AuthPubkey != "" {
+		pkBytes, err := hex.DecodeString(*user.AuthPubkey)
+		if err != nil || len(pkBytes) != ed25519.PublicKeySize {
+			if b64, b64Err := base64.RawURLEncoding.DecodeString(*user.AuthPubkey); b64Err == nil && len(b64) == ed25519.PublicKeySize {
+				pkBytes = b64
+			}
+		}
+		if len(pkBytes) == ed25519.PublicKeySize {
+			authPubKey = ed25519.PublicKey(pkBytes)
+		}
+	}
+
 	// RFC-0004 §5.3: Reconstruct Auth Payload.
 	// "rootinbox/v1/login" || Raw Nonce (32) || Session Public Key (32) || Raw Challenge ID (16)
 	authPayload := buildLoginPayload(nonce, sessionPKBytes, challengeIDBytes)
 
-	// Verify Ed25519 signature.
-	if !ed25519.Verify(identityPubKey, authPayload, signatureBytes) {
+	// Verify login signature: check against authPubKey if present, or identityPubKey.
+	loginVerified := false
+	if authPubKey != nil && ed25519.Verify(authPubKey, authPayload, signatureBytes) {
+		loginVerified = true
+	}
+	if !loginVerified && ed25519.Verify(identityPubKey, authPayload, signatureBytes) {
+		loginVerified = true
+	}
+	if !loginVerified {
 		uc.logger.Error("Verify failed: invalid login signature", "authPayloadLen", len(authPayload))
 		uc.emitAuthEvent(ctx, domain.EventAuthFailure, &user.ID)
 		return nil, authErr
 	}
 
 	// Phase 12 / Task 0.5: Verify the 73-byte session signature.
-	// RFC-0003 §5.1: Server MUST verify the session signature to prevent
-	// session key substitution (MITM prevention).
 	var sessionPK [32]byte
 	copy(sessionPK[:], sessionPKBytes)
 	var identityPKHash [32]byte
@@ -377,7 +522,14 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identityHashB64, challengeIDB
 	var sessionSig [64]byte
 	copy(sessionSig[:], sessionSigBytes)
 
-	if !crypto.VerifySessionSignature(identityPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig) {
+	sessionVerified := false
+	if authPubKey != nil && crypto.VerifySessionSignature(authPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig) {
+		sessionVerified = true
+	}
+	if !sessionVerified && crypto.VerifySessionSignature(identityPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig) {
+		sessionVerified = true
+	}
+	if !sessionVerified {
 		uc.logger.Error("Verify failed: invalid session signature")
 		uc.emitAuthEvent(ctx, domain.EventAuthFailure, &user.ID)
 		return nil, authErr
@@ -448,7 +600,6 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identityHashB64, challengeIDB
 	uc.logger.Info("user authenticated", "user_id", result.UserID)
 	return result, nil
 }
-
 
 // IssueWSTicket generates a WebSocket authentication ticket.
 // RFC-0004 §7.3: Short-lived ticket bridge.
@@ -642,4 +793,3 @@ func (uc *AuthUseCase) IssueMediaToken(ctx context.Context, userID string) (stri
 	// We didn't actually implement media tokens, but this satisfies the requirement
 	return "mock-media-token", nil
 }
-
