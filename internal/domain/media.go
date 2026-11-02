@@ -1,6 +1,24 @@
 package domain
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// canonicalLowercaseUUIDRegex enforces standard lowercase UUIDv4 format.
+var canonicalLowercaseUUIDRegex = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// ValidateFileID validates that fileID conforms to canonical lowercase UUID format.
+// Strictly rejects empty strings, path separators, traversal sequences, and non-canonical forms.
+func ValidateFileID(fileID string) error {
+	if fileID == "" {
+		return NewDomainError(ErrSys001, "file_id is required", nil)
+	}
+	if len(fileID) != 36 || !canonicalLowercaseUUIDRegex.MatchString(fileID) {
+		return NewDomainError(ErrSys001, "invalid file_id format: must be canonical lowercase UUID", nil)
+	}
+	return nil
+}
 
 // MediaStatus represents the state of a media file in its lifecycle.
 // RFC-0007 §6.1: Explicit MediaStatus Enum.

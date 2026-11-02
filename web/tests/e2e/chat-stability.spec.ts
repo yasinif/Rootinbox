@@ -1,6 +1,7 @@
 import { test, expect, type Page, type BrowserContext } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomTestUsername } from '../test-random';
 
 interface MetricsSnapshot {
   allocBytes: number;
@@ -44,7 +45,7 @@ async function fetchServerMetrics(baseURL: string, dbPath: string): Promise<Metr
 }
 
 async function registerUser(page: Page, prefix: string): Promise<string> {
-  const username = `${prefix}_${Math.random().toString(36).substring(2, 9)}`;
+  const username = randomTestUsername(prefix, 7);
   await page.goto('/');
 
   // If already authenticated and chat screen is visible, sign out first

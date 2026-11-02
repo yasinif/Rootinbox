@@ -3,6 +3,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { randomTestUsername } from '../../../web/tests/test-random';
 
 const ROOT_DIR = path.resolve(__dirname, '../../..');
 
@@ -127,8 +128,8 @@ test.describe('Server Relocation Test Harness (A3)', () => {
     const contextAliceA = await browser.newContext();
     const pageAliceA = await contextAliceA.newPage();
 
-    const usernameAlice = `alice_${Math.random().toString(36).substring(2, 8)}`;
-    const usernameBob = `bob_${Math.random().toString(36).substring(2, 8)}`;
+    const usernameAlice = randomTestUsername('alice', 6);
+    const usernameBob = randomTestUsername('bob', 6);
     const testPassword = 'Password12345!';
 
     // Register Alice

@@ -61,8 +61,11 @@ func (uc *MediaUseCase) Init(ctx context.Context, userID, fileID string, totalCh
 		return nil, domain.NewDomainError(domain.ErrSys001,
 			fmt.Sprintf("total_chunks must be between 1 and %d", domain.MaxTotalChunks), nil)
 	}
-	if fileID == "" || tokenHash == "" {
-		return nil, domain.NewDomainError(domain.ErrSys001, "file_id and token_hash are required", nil)
+	if err := domain.ValidateFileID(fileID); err != nil {
+		return nil, domain.NewDomainError(domain.ErrSys001, "invalid file_id format", err)
+	}
+	if tokenHash == "" {
+		return nil, domain.NewDomainError(domain.ErrSys001, "token_hash is required", nil)
 	}
 
 	var result *domain.MediaFile
@@ -144,6 +147,10 @@ func (uc *MediaUseCase) Init(ctx context.Context, userID, fileID string, totalCh
 // RFC-0007 §7.2: PUT /api/v1/media/upload/{file_id}/{chunk_index}.
 // Lock ordering: Per-File I/O Lock BEFORE DB transaction. No FS I/O inside DB tx.
 func (uc *MediaUseCase) UploadChunk(ctx context.Context, userID, fileID string, chunkIndex int, data []byte, clientHash string) error {
+	if err := domain.ValidateFileID(fileID); err != nil {
+		return domain.NewDomainError(domain.ErrSys001, "invalid file_id format", err)
+	}
+
 	// Validate chunk size.
 	if len(data) == 0 || len(data) > domain.ChunkCiphertextSize {
 		return domain.NewDomainError(domain.ErrMedia004,
@@ -251,6 +258,10 @@ func (uc *MediaUseCase) UploadChunk(ctx context.Context, userID, fileID string, 
 // Finalize completes a media upload.
 // RFC-0007 §7.3: 2-Phase Finalization.
 func (uc *MediaUseCase) Finalize(ctx context.Context, userID, fileID, clientManifestHash string) error {
+	if err := domain.ValidateFileID(fileID); err != nil {
+		return domain.NewDomainError(domain.ErrSys001, "invalid file_id format", err)
+	}
+
 	// Verify ownership and status.
 	file, err := uc.mediaFileRepo.GetByID(ctx, fileID)
 	if err != nil {
@@ -436,6 +447,10 @@ func matchesTokenHash(storedHash, mediaToken string) bool {
 // DownloadChunk downloads a single chunk.
 // RFC-0007 §7.4: GET /api/v1/media/download/{file_id}/{chunk_index}.
 func (uc *MediaUseCase) DownloadChunk(ctx context.Context, mediaToken, fileID string, chunkIndex int) ([]byte, error) {
+	if err := domain.ValidateFileID(fileID); err != nil {
+		return nil, domain.NewDomainError(domain.ErrSys001, "invalid file_id format", err)
+	}
+
 	// Verify file exists and token matches.
 	file, err := uc.mediaFileRepo.GetByID(ctx, fileID)
 	if err != nil {
@@ -467,6 +482,10 @@ func (uc *MediaUseCase) DownloadChunk(ctx context.Context, mediaToken, fileID st
 // RFC-0007 §8.5: Crash-Proof GC.
 // Auth: Either valid Media_Token OR Uploader's Session.
 func (uc *MediaUseCase) Delete(ctx context.Context, userID, mediaToken, fileID string) error {
+	if err := domain.ValidateFileID(fileID); err != nil {
+		return domain.NewDomainError(domain.ErrSys001, "invalid file_id format", err)
+	}
+
 	file, err := uc.mediaFileRepo.GetByID(ctx, fileID)
 	if err != nil {
 		return err
