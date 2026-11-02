@@ -91,7 +91,7 @@ func WriteDomainError(w http.ResponseWriter, err error) {
 // httpStatusFromCode maps domain error codes to HTTP status codes.
 func httpStatusFromCode(code domain.ErrorCode) int {
 	switch code {
-	case domain.ErrUsr001, domain.ErrConv001, domain.ErrPart001, domain.ErrMedia001, domain.ErrCall001, domain.ErrCall003, domain.ErrPush001, domain.ErrRing001, domain.ErrSess001:
+	case domain.ErrUsr001, domain.ErrConv001, domain.ErrPart001, domain.ErrMedia001, domain.ErrCall001, domain.ErrCall003, domain.ErrPush001, domain.ErrRing001, domain.ErrSess001, domain.ErrVault003:
 		return http.StatusNotFound
 	case domain.ErrUsr002, domain.ErrUsr003, domain.ErrVault001, domain.ErrMedia002, domain.ErrCall002, domain.ErrAdm002, domain.ErrAdm003:
 		return http.StatusConflict

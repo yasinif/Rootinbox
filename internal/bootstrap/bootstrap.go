@@ -69,6 +69,7 @@ type App struct {
 	SessionRepo     domain.SessionRepository
 	MessageRepo     domain.MessageRepository
 	VaultRepo       domain.VaultRepository
+	ZKVaultRepo     domain.ZKVaultRepository
 	MediaFileRepo   domain.MediaFileRepository
 	MediaChunkRepo  domain.MediaChunkRepository
 	QuotaRepo       domain.QuotaRepository
@@ -220,6 +221,8 @@ func Run(ctx context.Context, version, buildHash, buildTime string) (*App, error
 	app.PushSubRepo = pushSubRepo
 	app.SecurityEventRepo = secEventRepo
 	app.IPBlockRepo = ipBlockRepo
+	zkVaultRepo := repository.NewZKVaultRepository(db.Writer, db.Reader)
+	app.ZKVaultRepo = zkVaultRepo
 	app.GroupMsgRepo = groupMsgRepo
 
 	// Phase 10: Infrastructure Caches and Stores
@@ -311,6 +314,7 @@ func Run(ctx context.Context, version, buildHash, buildTime string) (*App, error
 	// Phase 4: Wire auth use case.
 	app.AuthUC = usecase.NewAuthUseCase(userRepo, sessionRepo, ns, ts, app.TxManager, clock, uuidGen, domainLogger, asyncAuditor)
 	app.AuthUC.SetSessionTerminator(wsHub)
+	app.AuthUC.SetServerSaltSecret(cfg.Security.IPHashSecret.Reveal())
 	authHandler := deliveryhttp.NewAuthHandler(app.AuthUC)
 
 	// Phase 5: Wire message use case and WS handler.
@@ -319,6 +323,7 @@ func Run(ctx context.Context, version, buildHash, buildTime string) (*App, error
 	// Phase 6: Wire sync and vault use cases + handlers.
 	app.SyncUC = usecase.NewSyncUseCase(messageRepo, wsHub, clock, domainLogger)
 	app.VaultUC = usecase.NewVaultUseCase(vaultRepo, clock, uuidGen, domainLogger)
+	app.VaultUC.SetZKVaultRepo(zkVaultRepo)
 	syncHandler := deliveryhttp.NewSyncHandler(app.SyncUC)
 	vaultHandler := deliveryhttp.NewVaultHandler(app.VaultUC)
 
