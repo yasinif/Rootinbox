@@ -324,6 +324,12 @@ func All() []Migration {
 			Up:          mustReadSQL("sql/000021_user_presence_last_seen.up.sql"),
 			Down:        mustReadSQL("sql/000021_user_presence_last_seen.down.sql"),
 		},
+		{
+			Version:     22,
+			Description: "zero_knowledge_vault_and_clean_break",
+			Up:          mustReadSQL("sql/000022_zero_knowledge_vault_and_clean_break.up.sql"),
+			Down:        mustReadSQL("sql/000022_zero_knowledge_vault_and_clean_break.down.sql"),
+		},
 	}
 }
 
@@ -336,4 +342,3 @@ func mustReadSQL(name string) string {
 	}
 	return string(data)
 }
-
