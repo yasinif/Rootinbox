@@ -3,14 +3,16 @@ package usecase
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/hkdf"
 
 	"rootinbox/internal/domain"
 	"rootinbox/pkg/crypto"
@@ -99,6 +101,10 @@ func (uc *AuthUseCase) GetKDFParams(ctx context.Context, username string) (*KDFP
 		return nil, domain.NewDomainError(domain.ErrUsr004, "username is required", nil)
 	}
 
+	if len(uc.serverSaltSecret) == 0 {
+		return nil, domain.NewDomainError(domain.ErrSys001, "server salt secret is not configured", nil)
+	}
+
 	user, err := uc.userRepo.GetByUsername(ctx, canonical)
 	if err == nil && user != nil && user.KDFSalt != nil && *user.KDFSalt != "" {
 		mem := user.KDFMemoryKiB
@@ -121,14 +127,13 @@ func (uc *AuthUseCase) GetKDFParams(ctx context.Context, username string) (*KDFP
 		}, nil
 	}
 
-	// Unknown user (or user without salt): generate deterministic fake salt
-	secret := uc.serverSaltSecret
-	if len(secret) == 0 {
-		secret = []byte("rootinbox-default-anti-enumeration-kdf-salt-secret")
+	// Unknown user (or user without salt): generate deterministic fake salt via HKDF
+	fakeSaltBytes := make([]byte, 16)
+	kdfReader := hkdf.Expand(sha256.New, uc.serverSaltSecret, []byte("rootinbox/kdf-fake-salt/v1:"+canonical))
+	if _, err := io.ReadFull(kdfReader, fakeSaltBytes); err != nil {
+		return nil, fmt.Errorf("deriving fake salt: %w", err)
 	}
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte("kdf-salt:" + canonical))
-	fakeSalt := hex.EncodeToString(mac.Sum(nil)[:16])
+	fakeSalt := hex.EncodeToString(fakeSaltBytes)
 
 	return &KDFParamsResult{
 		Salt:        fakeSalt,
@@ -340,19 +345,21 @@ func (uc *AuthUseCase) Challenge(ctx context.Context, identifier string) (*Chall
 	} else if b, err := hex.DecodeString(identifier); err == nil && len(b) == 32 {
 		identityHashHex = canonical
 	} else {
+		if len(uc.serverSaltSecret) == 0 {
+			return nil, domain.NewDomainError(domain.ErrSys001, "server salt secret is not configured", nil)
+		}
 		// Look up user by username
 		user, err := uc.userRepo.GetByUsername(ctx, canonical)
 		if err == nil && user != nil {
 			identityHashHex = user.IdentityHash
 		} else {
 			// Generate deterministic fake identity hash to prevent timing and enumeration leaks
-			secret := uc.serverSaltSecret
-			if len(secret) == 0 {
-				secret = []byte("rootinbox-default-anti-enumeration-kdf-salt-secret")
+			fakeReader := hkdf.Expand(sha256.New, uc.serverSaltSecret, []byte("rootinbox/fake-identity/v1:"+canonical))
+			fakeIDBytes := make([]byte, 32)
+			if _, err := io.ReadFull(fakeReader, fakeIDBytes); err != nil {
+				return nil, fmt.Errorf("deriving fake identity: %w", err)
 			}
-			mac := hmac.New(sha256.New, secret)
-			mac.Write([]byte("fake-identity:" + canonical))
-			identityHashHex = hex.EncodeToString(mac.Sum(nil))
+			identityHashHex = hex.EncodeToString(fakeIDBytes)
 		}
 	}
 
@@ -484,7 +491,8 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identifier, challengeIDB64, s
 
 	// Decode user's AuthPubkey if configured.
 	var authPubKey ed25519.PublicKey
-	if user.AuthPubkey != nil && *user.AuthPubkey != "" {
+	hasAuthPubkey := user.AuthPubkey != nil && *user.AuthPubkey != ""
+	if hasAuthPubkey {
 		pkBytes, err := hex.DecodeString(*user.AuthPubkey)
 		if err != nil || len(pkBytes) != ed25519.PublicKeySize {
 			if b64, b64Err := base64.RawURLEncoding.DecodeString(*user.AuthPubkey); b64Err == nil && len(b64) == ed25519.PublicKeySize {
@@ -493,6 +501,9 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identifier, challengeIDB64, s
 		}
 		if len(pkBytes) == ed25519.PublicKeySize {
 			authPubKey = ed25519.PublicKey(pkBytes)
+		} else {
+			uc.logger.Error("Verify failed: invalid auth_pubkey stored for user", "user_id", user.ID)
+			return nil, authErr
 		}
 	}
 
@@ -500,13 +511,13 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identifier, challengeIDB64, s
 	// "rootinbox/v1/login" || Raw Nonce (32) || Session Public Key (32) || Raw Challenge ID (16)
 	authPayload := buildLoginPayload(nonce, sessionPKBytes, challengeIDBytes)
 
-	// Verify login signature: check against authPubKey if present, or identityPubKey.
+	// Verify login signature: if user has authPubKey, authPubKey signature is mandatory.
+	// Identity key signature is permitted ONLY as legacy fallback when authPubKey is not configured.
 	loginVerified := false
-	if authPubKey != nil && ed25519.Verify(authPubKey, authPayload, signatureBytes) {
-		loginVerified = true
-	}
-	if !loginVerified && ed25519.Verify(identityPubKey, authPayload, signatureBytes) {
-		loginVerified = true
+	if hasAuthPubkey {
+		loginVerified = ed25519.Verify(authPubKey, authPayload, signatureBytes)
+	} else {
+		loginVerified = ed25519.Verify(identityPubKey, authPayload, signatureBytes)
 	}
 	if !loginVerified {
 		uc.logger.Error("Verify failed: invalid login signature", "authPayloadLen", len(authPayload))
@@ -523,11 +534,10 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identifier, challengeIDB64, s
 	copy(sessionSig[:], sessionSigBytes)
 
 	sessionVerified := false
-	if authPubKey != nil && crypto.VerifySessionSignature(authPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig) {
-		sessionVerified = true
-	}
-	if !sessionVerified && crypto.VerifySessionSignature(identityPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig) {
-		sessionVerified = true
+	if hasAuthPubkey {
+		sessionVerified = crypto.VerifySessionSignature(authPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig)
+	} else {
+		sessionVerified = crypto.VerifySessionSignature(identityPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig)
 	}
 	if !sessionVerified {
 		uc.logger.Error("Verify failed: invalid session signature")

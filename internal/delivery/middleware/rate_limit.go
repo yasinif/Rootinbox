@@ -28,6 +28,10 @@ func WithRouteClass(class domain.RouteClass) func(http.Handler) http.Handler {
 func RateLimit(limiter RateLimiter, auditor domain.SecurityAuditor) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if limiter == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
 			ipHash, _ := domain.IPHashFromContext(r.Context())
 			userID, _ := domain.UserIDFromContext(r.Context())
 			routeClass, ok := domain.RouteClassFromContext(r.Context())
@@ -35,8 +39,6 @@ func RateLimit(limiter RateLimiter, auditor domain.SecurityAuditor) func(http.Ha
 				// Default to general if not set
 				routeClass = domain.RouteClassRestGeneral
 			}
-
-
 
 			if !limiter.Allow(r.Context(), routeClass, ipHash, userID) {
 				// Emit async audit event

@@ -13,10 +13,10 @@ In the original RootInbox prototype, the user's single Ed25519 identity keypair 
 
 Stage 1a introduces the foundation for true Zero-Knowledge End-to-End Encryption (ZKE2EE) by delivering:
 1. **Key Hierarchy Decoupling**: Eliminates the authentication circularity by separating the passphrase-derived **Authentication Keypair** (`auth_sk`, `auth_pk`) from the random **Identity Keypair** (`id_sign_sk`, `id_dh_sk`), which remains permanently sealed inside the user's Zero-Knowledge Vault.
-2. **Pre-Auth KDF Parameters Endpoint**: Provides a timing-safe, anti-enumeration `GET /api/v1/auth/kdf-params` endpoint returning real user parameters or deterministic fake salts computed via `HMAC-SHA256(SERVER_SALT_SECRET, "kdf-salt:" || username)`.
+2. **Pre-Auth KDF Parameters Endpoint**: Provides a timing-safe, anti-enumeration `GET /api/v1/auth/kdf-params` endpoint returning real user parameters or deterministic fake salts computed via `HKDF-Expand(SHA256, SERVER_SALT_SECRET, "rootinbox/kdf-fake-salt/v1:" || username, 16)`. If `SERVER_SALT_SECRET` (sourced from `IP_HASH_SECRET`) is not configured, the server fails closed with `SYS_001`.
 3. **Clean-Break Database Migration (`000022`)**: Extends `users` with `auth_pubkey` and KDF configuration, purges legacy plaintext archives (`vaults`, `message_history`, `delivery_acks`), and creates `zk_vaults`, `conversation_epoch_keys`, and envelope-ready `group_messages`.
 4. **Zero-Knowledge Vault Storage**: Authenticated REST endpoints (`GET` and `PUT` `/api/v1/vault/current`) with optimistic concurrency version checking (`If-Match` header) preventing state rollback and concurrent device overwrite.
-5. **Deterministic Cryptographic Derivation**: Calibrated Argon2id parameters (32 MiB memory, 4 iterations, 1 parallelism) and HKDF-SHA256 key expansion with standardized context labels.
+5. **Deterministic Cryptographic Derivation & Rate Limiting**: Calibrated Argon2id parameters (32 MiB memory, 4 iterations, 1 parallelism), HKDF-SHA256 key expansion with standardized context labels, and per-IP rate-limiting on unauthenticated endpoints (`auth.unauthenticated`, 20 req/min).
 
 ---
 
@@ -190,11 +190,14 @@ CREATE TABLE vaults (
     }
   }
   ```
-  *Derivation*: `fake_salt = hex(HMAC-SHA256(SERVER_SALT_SECRET, "kdf-salt:" || canonical(username))[:16])`.
+  *Derivation*: `fake_salt = hex(HKDF-Expand(SHA256, SERVER_SALT_SECRET, "rootinbox/kdf-fake-salt/v1:" || canonical(username), 16))`.
   The timing and status code are indistinguishable between existing and non-existing accounts.
+  *Fail-Closed*: If `SERVER_SALT_SECRET` (configured via `IP_HASH_SECRET`) is unconfigured, the server fails closed with `SYS_001`.
+  *Rate Limiting*: Rate-limited under `auth.unauthenticated` (20 requests/minute per IP).
 
 ### 4.2 Authentication Challenge
 - **Route**: `POST /api/v1/auth/challenge`
+- **Rate Limiting**: Rate-limited under `auth.unauthenticated` (20 requests/minute per IP).
 - **Request Body**:
   ```json
   {
@@ -202,6 +205,8 @@ CREATE TABLE vaults (
   }
   ```
   *(Backwards-compatible support for `identity_hash` is maintained).*
+- **Unknown Username (Anti-Enumeration Fake Identity)**:
+  Derived via `fake_identity = hex(HKDF-Expand(SHA256, SERVER_SALT_SECRET, "rootinbox/fake-identity/v1:" || canonical(username), 32))`. Nonce is generated and stored identically to prevent timing and enumeration leaks.
 - **Response Status**: `200 OK`
 - **Response Data**:
   ```json
@@ -217,19 +222,24 @@ CREATE TABLE vaults (
 
 ### 4.3 Authentication Login / Verify (Decoupled Auth Keypair)
 - **Route**: `POST /api/v1/auth/verify` (or `POST /api/v1/auth/login`)
+- **Rate Limiting**: Rate-limited under `auth.unauthenticated` (20 requests/minute per IP).
 - **Request Body**:
   ```json
   {
     "username": "alice",
     "challenge_id": "c7a8b9d0-...",
-    "signature": "<hex_signature_over_nonce_and_timestamp>",
-    "remember_me": true
+    "session_pk": "<base64url_session_public_key>",
+    "signature": "<base64url_signature_over_auth_payload>",
+    "session_signature": "<base64url_session_signature>",
+    "session_expires_at": 1714570000
   }
   ```
 - **Verification Logic**:
-  1. Look up user by `username`.
-  2. If user has `auth_pubkey`, verify `signature` over `nonce || timestamp` using `crypto_sign_verify_detached(signature, message, auth_pubkey)`.
-  3. If user is legacy (no `auth_pubkey`), fallback to existing RFC-0004 identity verification.
+  1. Look up user by `username` or `identity_hash`.
+  2. If user has `auth_pubkey`, verification with `auth_pubkey` is **MANDATORY**:
+     - Both the login signature and 73-byte session signature must verify against `auth_pubkey`.
+     - Signatures generated with the Identity Key are **STRICTLY REJECTED** with `AUTH_001` (401).
+  3. If user is legacy (`auth_pubkey` is NULL or empty), legacy fallback to `identity_pubkey` is permitted.
   4. Create session and return `ps_session` cookie + bearer token.
 
 ### 4.4 Zero-Knowledge Vault: Fetch Current

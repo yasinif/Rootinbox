@@ -226,7 +226,7 @@ func TestAuthUseCase_DecoupledAuthAndKDF(t *testing.T) {
 	authUC.SetServerSaltSecret([]byte("test-salt-secret-0000111122223333"))
 
 	// Generate keypairs: Identity keypair and decoupled Auth keypair
-	idPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	idPub, idPriv, _ := ed25519.GenerateKey(rand.Reader)
 	authPub, authPriv, _ := ed25519.GenerateKey(rand.Reader)
 
 	idHashBytes := sha256.Sum256(idPub)
@@ -317,6 +317,71 @@ func TestAuthUseCase_DecoupledAuthAndKDF(t *testing.T) {
 		}
 		if authRes.RawToken == "" {
 			t.Errorf("expected non-empty session token")
+		}
+	})
+
+	t.Run("User with AuthPubkey REJECTS signature made with identity key (ErrAuth001)", func(t *testing.T) {
+		challengeRes, err := authUC.Challenge(context.Background(), "alice")
+		if err != nil {
+			t.Fatalf("challenge failed: %v", err)
+		}
+
+		nonceBytes, _ := base64.RawURLEncoding.DecodeString(challengeRes.Nonce)
+		challengeIDBytes, _ := base64.RawURLEncoding.DecodeString(challengeRes.ChallengeID)
+
+		sessionPK := make([]byte, 32)
+		_, _ = rand.Read(sessionPK)
+
+		authPayload := buildLoginPayload(nonceBytes, sessionPK, challengeIDBytes)
+		// Sign with idPriv instead of authPriv
+		invalidLoginSig := ed25519.Sign(idPriv, authPayload)
+
+		var sessPKArr [32]byte
+		copy(sessPKArr[:], sessionPK)
+		var idHashArr [32]byte
+		copy(idHashArr[:], idHashBytes[:])
+		expiresAt := clock.NowUnix() + 604800
+
+		sessionSigArr := crypto.SignSessionKey(idPriv, crypto.CryptoSuiteV1, sessPKArr, expiresAt, idHashArr)
+
+		_, err = authUC.Verify(
+			context.Background(),
+			"alice",
+			challengeRes.ChallengeID,
+			base64.RawURLEncoding.EncodeToString(sessionPK),
+			base64.RawURLEncoding.EncodeToString(invalidLoginSig),
+			base64.RawURLEncoding.EncodeToString(sessionSigArr[:]),
+			expiresAt,
+		)
+		if err == nil {
+			t.Fatalf("expected verify to fail when user has authPubkey but signs with identity key, but succeeded")
+		}
+		var de *domain.DomainError
+		if !isErr(err, &de) || de.Code != domain.ErrAuth001 {
+			t.Fatalf("expected ErrAuth001, got %v", err)
+		}
+	})
+
+	t.Run("Fail-closed behavior when serverSaltSecret is unconfigured", func(t *testing.T) {
+		unconfiguredUC := NewAuthUseCase(userRepo, sessionRepo, nonceStore, nil, txMgr, clock, uuidGen, logger, nil)
+
+		// GetKDFParams must return ErrSys001
+		_, err := unconfiguredUC.GetKDFParams(context.Background(), "bob_unknown")
+		if err == nil {
+			t.Fatal("expected GetKDFParams to fail when serverSaltSecret is empty")
+		}
+		var de *domain.DomainError
+		if !isErr(err, &de) || de.Code != domain.ErrSys001 {
+			t.Fatalf("expected ErrSys001 from GetKDFParams, got %v", err)
+		}
+
+		// Challenge with username must return ErrSys001
+		_, err = unconfiguredUC.Challenge(context.Background(), "bob_unknown")
+		if err == nil {
+			t.Fatal("expected Challenge to fail when serverSaltSecret is empty")
+		}
+		if !isErr(err, &de) || de.Code != domain.ErrSys001 {
+			t.Fatalf("expected ErrSys001 from Challenge, got %v", err)
 		}
 	})
 

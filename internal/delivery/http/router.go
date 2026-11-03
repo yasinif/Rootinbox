@@ -53,18 +53,25 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// RFC-0001 Section 4: Prometheus Metrics (/api/v1/metrics).
 	mux.Handle("GET /api/v1/metrics", promhttp.HandlerFor(deps.Registry, promhttp.HandlerOpts{}))
 
+	// RFC-0004 / RFC-0011: Public auth endpoints rate-limited under RouteClassAuthUnauthenticated (20/min per IP).
+	authUnauthChain := func(h http.Handler) http.Handler {
+		return middleware.WithRouteClass(domain.RouteClassAuthUnauthenticated)(
+			middleware.RateLimit(deps.RateLimiter, deps.Auditor)(h),
+		)
+	}
+
 	// RFC-0004 §5.1: Registration endpoint (public).
-	mux.HandleFunc("POST /api/v1/auth/register", deps.AuthHandler.HandleRegister())
+	mux.Handle("POST /api/v1/auth/register", authUnauthChain(deps.AuthHandler.HandleRegister()))
 
 	// RFC-0004 §5.2: Challenge endpoint (public).
-	mux.HandleFunc("POST /api/v1/auth/challenge", deps.AuthHandler.HandleChallenge())
+	mux.Handle("POST /api/v1/auth/challenge", authUnauthChain(deps.AuthHandler.HandleChallenge()))
 
 	// Pre-auth KDF parameters (RFC Stage 1a, public, anti-enumeration).
-	mux.HandleFunc("GET /api/v1/auth/kdf-params", deps.AuthHandler.HandleKDFParams())
+	mux.Handle("GET /api/v1/auth/kdf-params", authUnauthChain(deps.AuthHandler.HandleKDFParams()))
 
 	// RFC-0004 §5.3: Verify endpoint (public).
-	mux.HandleFunc("POST /api/v1/auth/verify", deps.AuthHandler.HandleVerify())
-	mux.HandleFunc("POST /api/v1/auth/login", deps.AuthHandler.HandleVerify())
+	mux.Handle("POST /api/v1/auth/verify", authUnauthChain(deps.AuthHandler.HandleVerify()))
+	mux.Handle("POST /api/v1/auth/login", authUnauthChain(deps.AuthHandler.HandleVerify()))
 
 	// --- Authenticated endpoints (SessionAuth middleware) ---
 	sessionAuth := middleware.SessionAuth(deps.SessionRepo, deps.Logger)
