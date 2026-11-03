@@ -164,7 +164,7 @@ export function ForwardModal({
                         ? 'Group Chat'
                         : isChannel
                           ? 'Broadcast Channel'
-                          : 'End-to-End Encrypted'}
+                          : 'Protected in Transit (HTTPS)'}
                   </div>
                 </div>
                 {isSelected && <span className="forward-selected-check">✓</span>}

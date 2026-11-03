@@ -2,7 +2,7 @@
   "id": "/",
   "name": "RootInbox",
   "short_name": "RootInbox",
-  "description": "Zero-Knowledge E2EE Messaging",
+  "description": "Private Messaging · Protected in Transit (HTTPS)",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

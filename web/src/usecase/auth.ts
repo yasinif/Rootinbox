@@ -6,7 +6,21 @@
  * Auth failures: single uniform message (no detail leak).
  */
 
-import type { AuthPort, CryptoPort, MetadataPort, SessionDTO } from '../domain';
+import {
+  AUTH_SECURE_CONTEXT,
+  AUTH_NETWORK_OR_CERT,
+  AUTH_BROWSER_UNSUPPORTED,
+  AUTH_INSUFFICIENT_MEMORY,
+  AUTH_CRYPTO_SELFTEST_FAILED,
+  AUTH_CLOCK_SKEW,
+  AUTH_INVALID_CREDENTIALS,
+  AUTH_RATE_LIMITED,
+  type AuthErrorCode,
+  type AuthPort,
+  type CryptoPort,
+  type MetadataPort,
+  type SessionDTO,
+} from '../domain';
 
 export type AuthState = 'idle' | 'loading' | 'authenticated' | 'locked' | 'error';
 
@@ -18,6 +32,100 @@ export interface AuthStateSnapshot {
   displayName?: string | null;
   userId?: string | null;
   error: string | null;
+  errorCode?: AuthErrorCode | null;
+}
+
+/**
+ * Classify authentication error into safe, typed categories for truthful diagnostics.
+ */
+export function classifyAuthError(err: unknown, isRegistration = false): { code: AuthErrorCode; message: string } {
+  if (typeof window !== 'undefined' && !window.isSecureContext) {
+    return {
+      code: AUTH_SECURE_CONTEXT,
+      message: 'Secure context (HTTPS) required for authentication and cryptography.',
+    };
+  }
+
+  if (typeof window !== 'undefined' && (!window.crypto?.subtle || typeof WebAssembly === 'undefined')) {
+    return {
+      code: AUTH_BROWSER_UNSUPPORTED,
+      message: 'Browser not supported. Modern WebCrypto and WebAssembly are required.',
+    };
+  }
+
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const lowerMsg = msg.toLowerCase();
+
+  if (lowerMsg.includes('rate limit') || lowerMsg.includes('429') || lowerMsg.includes('too many requests')) {
+    return {
+      code: AUTH_RATE_LIMITED,
+      message: 'Too many attempts. Please wait a few moments before trying again.',
+    };
+  }
+
+  if (lowerMsg.includes('clock') || lowerMsg.includes('skew') || lowerMsg.includes('expired challenge') || lowerMsg.includes('timestamp')) {
+    return {
+      code: AUTH_CLOCK_SKEW,
+      message: 'Device clock out of sync. Please check your system date and time.',
+    };
+  }
+
+  if (
+    lowerMsg.includes('out of memory') ||
+    lowerMsg.includes('cannot allocate memory') ||
+    lowerMsg.includes('memory growth') ||
+    lowerMsg.includes('rangeerror: webassembly.memory') ||
+    lowerMsg.includes('allocation failed')
+  ) {
+    return {
+      code: AUTH_INSUFFICIENT_MEMORY,
+      message: 'Device ran out of memory during key derivation (Argon2id requires 64MB). Try closing other tabs or apps.',
+    };
+  }
+
+  if (lowerMsg.includes('worker timeout') || lowerMsg.includes('rehydrated') || lowerMsg.includes('crypto worker')) {
+    return {
+      code: AUTH_CRYPTO_SELFTEST_FAILED,
+      message: 'Cryptographic derivation timed out or worker crashed. Device may be power-throttled. Check /device-check.',
+    };
+  }
+
+  if (
+    lowerMsg.includes('failed to fetch') ||
+    lowerMsg.includes('load failed') ||
+    lowerMsg.includes('networkerror') ||
+    lowerMsg.includes('network error') ||
+    lowerMsg.includes('connection refused') ||
+    lowerMsg.includes('certificate') ||
+    lowerMsg.includes('cert')
+  ) {
+    return {
+      code: AUTH_NETWORK_OR_CERT,
+      message: 'Network error or untrusted TLS certificate. If using a local server, ensure the root CA is installed and trusted.',
+    };
+  }
+
+  if (err && typeof err === 'object' && 'code' in err) {
+    const apiErr = err as { code: string; message?: string };
+    if (apiErr.code === 'AUTH_001' || apiErr.code === 'AUTH_002') {
+      return {
+        code: AUTH_INVALID_CREDENTIALS,
+        message: isRegistration ? 'Registration failed. Please check your inputs.' : 'Invalid username or password.',
+      };
+    }
+  }
+
+  if (lowerMsg.includes('invalid') || lowerMsg.includes('unauthorized') || lowerMsg.includes('auth fail')) {
+    return {
+      code: AUTH_INVALID_CREDENTIALS,
+      message: isRegistration ? 'Registration failed' : 'Invalid username or password',
+    };
+  }
+
+  return {
+    code: AUTH_INVALID_CREDENTIALS,
+    message: isRegistration ? 'Registration failed' : 'Authentication failed',
+  };
 }
 
 type AuthStateListener = (snapshot: AuthStateSnapshot) => void;
@@ -221,16 +329,16 @@ export class AuthUseCase {
       if (err && typeof err === 'object' && 'code' in err) {
         const apiErr = err as { code: string; message?: string };
         if (apiErr.code === 'USR_003' || apiErr.code === 'USR_002') {
-          this.emit({ state: 'error', error: 'Username is already taken' });
+          this.emit({ state: 'error', error: 'Username is already taken', errorCode: AUTH_INVALID_CREDENTIALS });
           return;
         }
         if (apiErr.code === 'USR_004') {
-          this.emit({ state: 'error', error: apiErr.message || 'Invalid username format' });
+          this.emit({ state: 'error', error: apiErr.message || 'Invalid username format', errorCode: AUTH_INVALID_CREDENTIALS });
           return;
         }
       }
-      // Single uniform error message — no detail leak.
-      this.emit({ state: 'error', error: 'Authentication failed' });
+      const classified = classifyAuthError(err, true);
+      this.emit({ state: 'error', error: classified.message, errorCode: classified.code });
     }
   }
 
@@ -372,8 +480,9 @@ export class AuthUseCase {
         displayName,
         userId: result.user_id,
       });
-    } catch {
-      this.emit({ state: 'error', error: 'Authentication failed' });
+    } catch (err: unknown) {
+      const classified = classifyAuthError(err, false);
+      this.emit({ state: 'error', error: classified.message, errorCode: classified.code });
     }
   }
 

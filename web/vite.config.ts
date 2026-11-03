@@ -56,6 +56,13 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    target: ['es2020', 'safari15.4', 'ios15.4', 'chrome90', 'edge90', 'firefox90'],
+    rollupOptions: {
+      input: {
+        main: `${import.meta.dirname}/index.html`,
+        deviceCheck: `${import.meta.dirname}/device-check.html`,
+      },
+    },
   },
   define: {
     __BUILD_TIMESTAMP__: JSON.stringify(new Date().toISOString()),

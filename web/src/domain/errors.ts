@@ -47,6 +47,34 @@ export const PSH_C02 = 'PSH_C02' as const;
 /** Service worker registration failed. */
 export const PSH_C03 = 'PSH_C03' as const;
 
+// ── Auth errors (AUTH_*) ──
+/** Insecure context: WebCrypto and modern security primitives require HTTPS or localhost. */
+export const AUTH_SECURE_CONTEXT = 'AUTH_SECURE_CONTEXT' as const;
+/** Network error or untrusted TLS certificate. */
+export const AUTH_NETWORK_OR_CERT = 'AUTH_NETWORK_OR_CERT' as const;
+/** Missing required browser features (WebCrypto, WebAssembly). */
+export const AUTH_BROWSER_UNSUPPORTED = 'AUTH_BROWSER_UNSUPPORTED' as const;
+/** WebAssembly or worker memory allocation failure (e.g., 64MB Argon2id). */
+export const AUTH_INSUFFICIENT_MEMORY = 'AUTH_INSUFFICIENT_MEMORY' as const;
+/** Client-side cryptographic self-test or worker execution failed. */
+export const AUTH_CRYPTO_SELFTEST_FAILED = 'AUTH_CRYPTO_SELFTEST_FAILED' as const;
+/** Device clock skew prevents valid challenge authentication. */
+export const AUTH_CLOCK_SKEW = 'AUTH_CLOCK_SKEW' as const;
+/** Invalid credentials or challenge signature verification failure. */
+export const AUTH_INVALID_CREDENTIALS = 'AUTH_INVALID_CREDENTIALS' as const;
+/** Rate limited by server. */
+export const AUTH_RATE_LIMITED = 'AUTH_RATE_LIMITED' as const;
+
+export type AuthErrorCode =
+  | typeof AUTH_SECURE_CONTEXT
+  | typeof AUTH_NETWORK_OR_CERT
+  | typeof AUTH_BROWSER_UNSUPPORTED
+  | typeof AUTH_INSUFFICIENT_MEMORY
+  | typeof AUTH_CRYPTO_SELFTEST_FAILED
+  | typeof AUTH_CLOCK_SKEW
+  | typeof AUTH_INVALID_CREDENTIALS
+  | typeof AUTH_RATE_LIMITED;
+
 /** Union type of all Phase 12B error codes. */
 export type Phase12BErrorCode =
   | typeof CALL_C01 | typeof CALL_C02 | typeof CALL_C03
