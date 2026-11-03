@@ -63,8 +63,9 @@ export function ChatScreen() {
   const [showPushBanner, setShowPushBanner] = useState<boolean>(false);
   const [isEnablingPush, setIsEnablingPush] = useState<boolean>(false);
 
-  // Pending Recovery Key Modal state (Stage 1a)
+  // Pending Recovery Key Banner & Modal state (Stage 1a)
   const [pendingRecoveryKey, setPendingRecoveryKey] = useState<string | null>(null);
+  const [showRecoveryModal, setShowRecoveryModal] = useState<boolean>(false);
 
   useEffect(() => {
     let active = true;
@@ -77,6 +78,7 @@ export function ChatScreen() {
   }, [metadataPort]);
 
   const handleRecoveryKeyClose = async (skipped: boolean) => {
+    setShowRecoveryModal(false);
     setPendingRecoveryKey(null);
     await metadataPort.delete('pending_recovery_key');
     if (skipped) {
@@ -499,6 +501,35 @@ export function ChatScreen() {
                 className="push-banner-btn-close"
                 aria-label="Dismiss"
                 onClick={handleDismissPushBanner}
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Stage 1a: Account Recovery Key Banner */}
+        {pendingRecoveryKey && (
+          <div id="recovery-key-banner" className="push-banner" role="alert">
+            <div className="push-banner-content">
+              <span className="push-banner-icon">🔑</span>
+              <span className="push-banner-text">Backup your recovery key to protect your chats.</span>
+            </div>
+            <div className="push-banner-actions">
+              <button
+                id="recovery-banner-view-btn"
+                type="button"
+                className="push-banner-btn-enable"
+                onClick={() => setShowRecoveryModal(true)}
+              >
+                View
+              </button>
+              <button
+                id="recovery-banner-dismiss-btn"
+                type="button"
+                className="push-banner-btn-close"
+                aria-label="Dismiss"
+                onClick={() => { void handleRecoveryKeyClose(true); }}
               >
                 ✕
               </button>
@@ -1084,7 +1115,7 @@ export function ChatScreen() {
       />
 
       <RecoveryKeyModal
-        isOpen={Boolean(pendingRecoveryKey)}
+        isOpen={showRecoveryModal}
         recoveryKey={pendingRecoveryKey || ''}
         onClose={(skipped) => { void handleRecoveryKeyClose(skipped); }}
       />
