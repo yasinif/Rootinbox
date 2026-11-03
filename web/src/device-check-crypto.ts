@@ -110,8 +110,3 @@ export async function runCryptoProbes(): Promise<CryptoProbeResults> {
   };
 }
 
-// Attach to window so device-check.html can invoke it
-if (typeof window !== 'undefined') {
-  (window as unknown as { __runCryptoProbes: typeof runCryptoProbes }).__runCryptoProbes = runCryptoProbes;
-  window.dispatchEvent(new CustomEvent('crypto-probes-ready'));
-}
