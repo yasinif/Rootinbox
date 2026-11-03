@@ -167,8 +167,10 @@ async function runBasicChecks(): Promise<void> {
   }
 
   // 13. Notifications
-  if ('Notification' in window) {
-    updateRow('check-notifications', 'PASS', 'Notification API available (Permission: ' + Notification.permission + ')');
+  const win = typeof window !== 'undefined' ? (window as unknown as Record<string, unknown>) : null;
+  const notifApi = win ? (win['Notification'] as { permission?: string } | undefined) : undefined;
+  if (notifApi) {
+    updateRow('check-notifications', 'PASS', 'Notification API available (Permission: ' + notifApi.permission + ')');
   } else {
     updateRow('check-notifications', 'UNKNOWN', 'Notification API not available in this browser');
   }
