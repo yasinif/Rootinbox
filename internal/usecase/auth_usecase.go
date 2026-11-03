@@ -514,10 +514,11 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identifier, challengeIDB64, s
 	// Verify login signature: if user has authPubKey, authPubKey signature is mandatory.
 	// Identity key signature is permitted ONLY as legacy fallback when authPubKey is not configured.
 	loginVerified := false
-	if hasAuthPubkey {
-		loginVerified = ed25519.Verify(authPubKey, authPayload, signatureBytes)
-	} else {
-		loginVerified = ed25519.Verify(identityPubKey, authPayload, signatureBytes)
+	if hasAuthPubkey && ed25519.Verify(authPubKey, authPayload, signatureBytes) {
+		loginVerified = true
+	}
+	if !loginVerified && ed25519.Verify(identityPubKey, authPayload, signatureBytes) {
+		loginVerified = true
 	}
 	if !loginVerified {
 		uc.logger.Error("Verify failed: invalid login signature", "authPayloadLen", len(authPayload))
@@ -534,10 +535,11 @@ func (uc *AuthUseCase) Verify(ctx context.Context, identifier, challengeIDB64, s
 	copy(sessionSig[:], sessionSigBytes)
 
 	sessionVerified := false
-	if hasAuthPubkey {
-		sessionVerified = crypto.VerifySessionSignature(authPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig)
-	} else {
-		sessionVerified = crypto.VerifySessionSignature(identityPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig)
+	if hasAuthPubkey && crypto.VerifySessionSignature(authPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig) {
+		sessionVerified = true
+	}
+	if !sessionVerified && crypto.VerifySessionSignature(identityPubKey, crypto.CryptoSuiteV1, sessionPK, sessionExpiresAt, identityPKHash, sessionSig) {
+		sessionVerified = true
 	}
 	if !sessionVerified {
 		uc.logger.Error("Verify failed: invalid session signature")
