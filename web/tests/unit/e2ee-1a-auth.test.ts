@@ -66,6 +66,17 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
         salt: 'mock-salt-hex',
         recoveryKeyHex: 'mock-recovery-hex',
       })),
+      exportIdentityKeys: vi.fn(async () => ({
+        publicKey: 'mock-id-pk',
+        privateKey: 'mock-id-sk',
+      })),
+      importIdentityKeys: vi.fn(async () => {}),
+      getVaultIdentityKeys: vi.fn(async () => ({
+        id_sign_pk: 'mock-id-pk',
+        id_sign_sk: 'mock-id-sk',
+        id_dh_pk: 'mock-dh-pk',
+        id_dh_sk: 'mock-dh-sk',
+      })),
       sealZKVault: vi.fn(async (_payload: ZeroKnowledgeVaultPayload, _ver: number) => ({
         ciphertextHex: 'deadbeef-vault-ciphertext',
         signatureHex: 'mock-vault-signature',
@@ -116,6 +127,12 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
         schema_version: 1,
         user_id: 'user-alice-123',
         username: 'alice',
+        identity_keys: {
+          id_sign_pk: 'mock-id-pk',
+          id_sign_sk: 'mock-id-sk',
+          id_dh_pk: 'mock-dh-pk',
+          id_dh_sk: 'mock-dh-sk',
+        },
       }),
       1,
     );
@@ -128,7 +145,7 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
     expect(metadataStore.get('pending_recovery_key')).toBe('mock-recovery-hex');
   });
 
-  it('login fetches pre-auth KDF params and downloads/opens ZK vault', async () => {
+  it('login fetches pre-auth KDF params, downloads/opens ZK vault, and imports identity keys', async () => {
     vaultStore = {
       user_id: 'user-alice-123',
       version: 1,
@@ -153,7 +170,30 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
       1,
       'user-alice-123',
     );
+    expect(mockCryptoPort.importIdentityKeys).toHaveBeenCalledWith({
+      publicKey: 'pk',
+      privateKey: 'sk',
+    });
     expect(metadataStore.get('last_seen_vault_version')).toBe('1');
+  });
+
+  it('new-device login successfully imports identity keys from decrypted vault payload', async () => {
+    vaultStore = {
+      user_id: 'user-alice-123',
+      version: 2,
+      ciphertext: 'new-device-vault-ciphertext',
+      signature: 'mock-vault-signature',
+      updated_at: 2000,
+    };
+
+    const authUC = new AuthUseCase(mockAuthPort, mockCryptoPort, mockMetadataPort, mockZKVaultPort);
+    await authUC.login('alice', 'Password123!', true);
+
+    expect(mockCryptoPort.importIdentityKeys).toHaveBeenCalledWith({
+      publicKey: 'pk',
+      privateKey: 'sk',
+    });
+    expect(authUC.getSnapshot().state).toBe('authenticated');
   });
 
   it('login detects rollback if server serves older vault version', async () => {

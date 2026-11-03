@@ -154,3 +154,47 @@ export async function deriveVaultKey(masterSeed: Uint8Array): Promise<Uint8Array
 export async function deriveRecoveryKey(masterSeed: Uint8Array): Promise<Uint8Array> {
   return hkdfExpandSha256(masterSeed, RECOVERY_WRAPPING_KEY_INFO, 32);
 }
+
+export const CRYPTO_SUITE_V1 = 0x01;
+
+const AUTH_LOGIN_PREFIX = new TextEncoder().encode('rootinbox/v1/login');
+
+/**
+ * Builds the login authentication challenge payload according to RFC-0004 §5.3:
+ * "rootinbox/v1/login" || Raw Nonce (32 bytes) || Session Public Key (32 bytes) || Raw Challenge ID (16 bytes)
+ */
+export function buildLoginPayload(
+  nonce: Uint8Array,
+  sessionPK: Uint8Array,
+  challengeId: Uint8Array,
+): Uint8Array {
+  const payload = new Uint8Array(AUTH_LOGIN_PREFIX.length + 32 + 32 + challengeId.length);
+  payload.set(AUTH_LOGIN_PREFIX, 0);
+  let offset = AUTH_LOGIN_PREFIX.length;
+  payload.set(nonce, offset); offset += 32;
+  payload.set(sessionPK, offset); offset += 32;
+  payload.set(challengeId, offset);
+  return payload;
+}
+
+/**
+ * Builds the 73-byte session signature verification payload:
+ * Crypto Suite Version (1 byte) || Session Public Key (32 bytes) || ExpiresAt (8 bytes BE) || Identity PK Hash (32 bytes)
+ */
+export function buildSessionSigPayload(
+  version: number,
+  sessionPK: Uint8Array,
+  expiresAt: bigint,
+  identityPKHash: Uint8Array,
+): Uint8Array {
+  const payload = new Uint8Array(73);
+  payload[0] = version;
+  payload.set(sessionPK, 1);
+  let v = expiresAt & 0xFFFFFFFFFFFFFFFFn;
+  for (let i = 7; i >= 0; i--) {
+    payload[33 + i] = Number(v & 0xFFn);
+    v >>= 8n;
+  }
+  payload.set(identityPKHash, 41);
+  return payload;
+}

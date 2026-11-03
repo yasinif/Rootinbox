@@ -13,6 +13,7 @@ import type {
   SessionDTO,
   ZKVaultPort,
   ZeroKnowledgeVaultPayload,
+  VaultIdentityKeys,
 } from '../domain';
 
 export type AuthState = 'idle' | 'loading' | 'authenticated' | 'locked' | 'error';
@@ -243,16 +244,24 @@ export class AuthUseCase {
       // Stage 1a: Initialize and save initial Zero-Knowledge Vault (version 1)
       if (result.user_id && this.zkVaultPort && this.cryptoPort.sealZKVault) {
         try {
+          let vaultIdentityKeys: VaultIdentityKeys = {
+            id_sign_pk: identity.publicKey,
+            id_sign_sk: '',
+            id_dh_pk: '',
+            id_dh_sk: '',
+          };
+          if (this.cryptoPort.getVaultIdentityKeys) {
+            try {
+              vaultIdentityKeys = await this.cryptoPort.getVaultIdentityKeys();
+            } catch (err) {
+              console.warn('[AuthUseCase] getVaultIdentityKeys failed:', err);
+            }
+          }
           const initialPayload: ZeroKnowledgeVaultPayload = {
             schema_version: 1,
             user_id: result.user_id,
             username,
-            identity_keys: {
-              id_sign_pk: identity.publicKey,
-              id_sign_sk: '',
-              id_dh_pk: '',
-              id_dh_sk: '',
-            },
+            identity_keys: vaultIdentityKeys,
             devices: [
               {
                 device_id: 'default',
@@ -456,8 +465,16 @@ export class AuthUseCase {
                 throw new Error('Server rollback detected: vault version is older than local version');
               }
             }
-            await this.cryptoPort.openZKVault(vault.ciphertext, vault.signature, vault.version, vault.user_id);
+            const payload = await this.cryptoPort.openZKVault(vault.ciphertext, vault.signature, vault.version, vault.user_id);
             await this.metadataPort.set('last_seen_vault_version', String(vault.version));
+            if (payload && payload.identity_keys && payload.identity_keys.id_sign_pk && payload.identity_keys.id_sign_sk) {
+              if (this.cryptoPort.importIdentityKeys) {
+                await this.cryptoPort.importIdentityKeys({
+                  publicKey: payload.identity_keys.id_sign_pk,
+                  privateKey: payload.identity_keys.id_sign_sk,
+                });
+              }
+            }
           }
         } catch (err) {
           console.warn('[AuthUseCase] vault sync best-effort failed:', err);

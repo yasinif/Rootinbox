@@ -22,6 +22,7 @@ import { UserProfileModal } from './user/UserProfileModal';
 import { ThemeToggle } from './common/ThemeToggle';
 import { SessionsPanel } from './SessionsPanel';
 import { InstallModal } from './common/InstallModal';
+import { RecoveryKeyModal } from './common/RecoveryKeyModal';
 
 function formatConvTime(timestamp?: number): string {
   if (!timestamp) return '';
@@ -61,6 +62,27 @@ export function ChatScreen() {
   // Web Push Notification Banner state (Bug 2.7)
   const [showPushBanner, setShowPushBanner] = useState<boolean>(false);
   const [isEnablingPush, setIsEnablingPush] = useState<boolean>(false);
+
+  // Pending Recovery Key Modal state (Stage 1a)
+  const [pendingRecoveryKey, setPendingRecoveryKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void metadataPort.get('pending_recovery_key').then((key) => {
+      if (active && key) {
+        setPendingRecoveryKey(key);
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [metadataPort]);
+
+  const handleRecoveryKeyClose = async (skipped: boolean) => {
+    setPendingRecoveryKey(null);
+    await metadataPort.delete('pending_recovery_key');
+    if (skipped) {
+      await metadataPort.set('recovery_skipped', 'true');
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -1059,6 +1081,12 @@ export function ChatScreen() {
       <InstallModal
         isOpen={showInstallModal}
         onClose={() => setShowInstallModal(false)}
+      />
+
+      <RecoveryKeyModal
+        isOpen={Boolean(pendingRecoveryKey)}
+        recoveryKey={pendingRecoveryKey || ''}
+        onClose={(skipped) => { void handleRecoveryKeyClose(skipped); }}
       />
     </div>
   );

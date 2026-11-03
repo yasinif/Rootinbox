@@ -76,6 +76,9 @@ export interface CryptoPort {
   vaultEncrypt(plaintext: string): Promise<{ ciphertextHex: string; ivHex: string }>;
   vaultDecrypt(ciphertextHex: string, ivHex: string): Promise<{ plaintext: string }>;
   deriveStage1aKeys?(password: string, saltHexOrB64?: string): Promise<{ authPubkey: string; salt: string; recoveryKeyHex: string }>;
+  exportIdentityKeys?(): Promise<{ publicKey: string; privateKey: string }>;
+  importIdentityKeys?(keys: { publicKey: string; privateKey: string }): Promise<void>;
+  getVaultIdentityKeys?(): Promise<VaultIdentityKeys>;
   sealZKVault?(payload: ZeroKnowledgeVaultPayload, version: number): Promise<{ ciphertextHex: string; signatureHex: string }>;
   openZKVault?(ciphertextHex: string, signatureHex: string, version: number, userId: string): Promise<ZeroKnowledgeVaultPayload>;
   allocateSequence(): Promise<{ sequence: string }>;
@@ -391,16 +394,18 @@ export interface VaultArchivePort {
 }
 
 // ─── Zero-Knowledge Vault Port (Stage 1a) ──────────────────────
+export interface VaultIdentityKeys {
+  id_sign_pk: string;
+  id_sign_sk: string;
+  id_dh_pk: string;
+  id_dh_sk: string;
+}
+
 export interface ZeroKnowledgeVaultPayload {
   schema_version: 1;
   user_id: string;
   username: string;
-  identity_keys: {
-    id_sign_pk: string;
-    id_sign_sk: string;
-    id_dh_pk: string;
-    id_dh_sk: string;
-  };
+  identity_keys: VaultIdentityKeys;
   devices: Array<{
     device_id: string;
     label: string;

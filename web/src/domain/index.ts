@@ -14,7 +14,7 @@ export type {
   ConversationMemberDTO, GroupMessageDTO, CreateGroupParams,
   UnreadPort, VaultArchivePort, VaultMeta, HistoryItemDTO,
   SessionDTO, DeliveryAckDTO, KdfParamsDTO, ZKVaultDTO, ZKVaultPort,
-  ZeroKnowledgeVaultPayload,
+  ZeroKnowledgeVaultPayload, VaultIdentityKeys,
 } from './ports';
 export { encodeRoutingId, hexToBase64StdPadded, base64StdToHex, generateUUID } from './encoding';
 export { toMillis } from './timestamp';
