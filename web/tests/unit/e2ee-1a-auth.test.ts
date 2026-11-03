@@ -77,6 +77,13 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
         id_dh_pk: 'mock-dh-pk',
         id_dh_sk: 'mock-dh-sk',
       })),
+      generateRandomIdentityKeys: vi.fn(async () => ({
+        id_sign_pk: 'mock-random-id-pk',
+        id_sign_sk: 'mock-random-id-sk',
+        id_dh_pk: 'mock-random-dh-pk',
+        id_dh_sk: 'mock-random-dh-sk',
+        identity_hash: 'mock-random-id-hash',
+      })),
       sealZKVault: vi.fn(async (_payload: ZeroKnowledgeVaultPayload, _ver: number) => ({
         ciphertextHex: 'deadbeef-vault-ciphertext',
         signatureHex: 'mock-vault-signature',
@@ -122,17 +129,24 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
       'auth-pubkey-hex',
       'mock-salt-hex',
     );
+    expect(mockCryptoPort.generateRandomIdentityKeys).toHaveBeenCalled();
     expect(mockCryptoPort.sealZKVault).toHaveBeenCalledWith(
       expect.objectContaining({
         schema_version: 1,
         user_id: 'user-alice-123',
         username: 'alice',
         identity_keys: {
-          id_sign_pk: 'mock-id-pk',
-          id_sign_sk: 'mock-id-sk',
-          id_dh_pk: 'mock-dh-pk',
-          id_dh_sk: 'mock-dh-sk',
+          id_sign_pk: 'mock-random-id-pk',
+          id_sign_sk: 'mock-random-id-sk',
+          id_dh_pk: 'mock-random-dh-pk',
+          id_dh_sk: 'mock-random-dh-sk',
+          identity_hash: 'mock-random-id-hash',
         },
+        devices: expect.arrayContaining([
+          expect.objectContaining({
+            device_id: expect.any(String),
+          }),
+        ]),
       }),
       1,
     );
@@ -143,6 +157,8 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
     );
     expect(metadataStore.get('last_seen_vault_version')).toBe('1');
     expect(metadataStore.get('pending_recovery_key')).toBe('mock-recovery-hex');
+    expect(metadataStore.get('device_id')).toBeDefined();
+    expect(metadataStore.get('device_id')).not.toBe('default');
   });
 
   it('login fetches pre-auth KDF params, downloads/opens ZK vault, and imports identity keys', async () => {
@@ -208,12 +224,15 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
 
     const authUC = new AuthUseCase(mockAuthPort, mockCryptoPort, mockMetadataPort, mockZKVaultPort);
 
-    // Rollback error is caught inside login best-effort warning
+    // Rollback error must fail login and set error state
     await authUC.login('alice', 'Password123!', true);
 
     // openZKVault should NOT have been called with rolled-back vault
     expect(mockCryptoPort.openZKVault).not.toHaveBeenCalled();
     // last_seen_vault_version must remain 5, not rolled back
     expect(metadataStore.get('last_seen_vault_version')).toBe('5');
+    // Login MUST fail with error state
+    expect(authUC.getSnapshot().state).toBe('error');
+    expect(authUC.getSnapshot().error).toMatch(/rollback/i);
   });
 });

@@ -79,6 +79,7 @@ export interface CryptoPort {
   exportIdentityKeys?(): Promise<{ publicKey: string; privateKey: string }>;
   importIdentityKeys?(keys: { publicKey: string; privateKey: string }): Promise<void>;
   getVaultIdentityKeys?(): Promise<VaultIdentityKeys>;
+  generateRandomIdentityKeys?(): Promise<VaultIdentityKeys>;
   sealZKVault?(payload: ZeroKnowledgeVaultPayload, version: number): Promise<{ ciphertextHex: string; signatureHex: string }>;
   openZKVault?(ciphertextHex: string, signatureHex: string, version: number, userId: string): Promise<ZeroKnowledgeVaultPayload>;
   allocateSequence(): Promise<{ sequence: string }>;
@@ -399,6 +400,7 @@ export interface VaultIdentityKeys {
   id_sign_sk: string;
   id_dh_pk: string;
   id_dh_sk: string;
+  identity_hash?: string;
 }
 
 export interface ZeroKnowledgeVaultPayload {

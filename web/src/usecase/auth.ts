@@ -145,25 +145,42 @@ export class AuthUseCase {
       await this.metadataPort.delete('session_keyring');
       await this.metadataPort.delete('active_session_keypair');
 
-      // 1. Init crypto worker (derive identity key).
-      const identity = await this.cryptoPort.init(username, password);
-
-      // 1b. Derive Vault Key (Argon2id with username || 'VAULT').
-      await this.cryptoPort.deriveVaultKey(username, password);
-
       // Stage 1a: Derive KDF master seed, auth keypair, vault key, recovery key
       let authPubkey: string | undefined;
       let kdfSalt: string | undefined;
       let recoveryKeyHex: string | undefined;
       if (this.cryptoPort.deriveStage1aKeys) {
-        try {
-          const keys = await this.cryptoPort.deriveStage1aKeys(password);
-          authPubkey = keys.authPubkey;
-          kdfSalt = keys.salt;
-          recoveryKeyHex = keys.recoveryKeyHex;
-        } catch (err) {
-          console.warn('[AuthUseCase] deriveStage1aKeys failed:', err);
+        const keys = await this.cryptoPort.deriveStage1aKeys(password);
+        authPubkey = keys.authPubkey;
+        kdfSalt = keys.salt;
+        recoveryKeyHex = keys.recoveryKeyHex;
+      }
+
+      let vaultIdentityKeys: VaultIdentityKeys;
+      let identityPublicKey: string;
+      let identityHashHex: string;
+
+      if (this.cryptoPort.generateRandomIdentityKeys) {
+        // Stage 1a: Generate RANDOM identity keypair (Ed25519 + X25519) on client
+        vaultIdentityKeys = await this.cryptoPort.generateRandomIdentityKeys();
+        identityPublicKey = vaultIdentityKeys.id_sign_pk;
+        identityHashHex = vaultIdentityKeys.identity_hash || identityPublicKey;
+      } else {
+        // Legacy fallback
+        const identity = await this.cryptoPort.init(username, password);
+        identityPublicKey = identity.publicKey;
+        identityHashHex = identity.identityHash;
+        if (this.cryptoPort.deriveVaultKey) {
+          await this.cryptoPort.deriveVaultKey(username, password);
         }
+        vaultIdentityKeys = this.cryptoPort.getVaultIdentityKeys
+          ? await this.cryptoPort.getVaultIdentityKeys()
+          : {
+              id_sign_pk: identity.publicKey,
+              id_sign_sk: '',
+              id_dh_pk: '',
+              id_dh_sk: '',
+            };
       }
 
       // 1c. Remember Keys (RFC-0003 §8.3): Persist keys wrapped with non-extractable AES-GCM wrapping key
@@ -202,7 +219,7 @@ export class AuthUseCase {
       // 5. Persist session info.
       if (rememberMe) {
         await this.metadataPort.set('session_token', result.session_token);
-        await this.metadataPort.set('identity_hash', identity.identityHash);
+        await this.metadataPort.set('identity_hash', identityHashHex);
         if (result.user_id) {
           await this.metadataPort.set('user_id', result.user_id);
         }
@@ -231,7 +248,7 @@ export class AuthUseCase {
           sessionStorage.setItem('is_session_only', 'true');
           sessionStorage.setItem('session_token', result.session_token);
           sessionStorage.setItem('auth_username', username);
-          sessionStorage.setItem('identity_hash', identity.identityHash);
+          sessionStorage.setItem('identity_hash', identityHashHex);
           if (result.user_id) sessionStorage.setItem('user_id', result.user_id);
           if (displayName) sessionStorage.setItem('display_name', displayName);
         }
@@ -243,52 +260,40 @@ export class AuthUseCase {
 
       // Stage 1a: Initialize and save initial Zero-Knowledge Vault (version 1)
       if (result.user_id && this.zkVaultPort && this.cryptoPort.sealZKVault) {
-        try {
-          let vaultIdentityKeys: VaultIdentityKeys = {
-            id_sign_pk: identity.publicKey,
-            id_sign_sk: '',
-            id_dh_pk: '',
-            id_dh_sk: '',
-          };
-          if (this.cryptoPort.getVaultIdentityKeys) {
-            try {
-              vaultIdentityKeys = await this.cryptoPort.getVaultIdentityKeys();
-            } catch (err) {
-              console.warn('[AuthUseCase] getVaultIdentityKeys failed:', err);
-            }
-          }
-          const initialPayload: ZeroKnowledgeVaultPayload = {
-            schema_version: 1,
-            user_id: result.user_id,
-            username,
-            identity_keys: vaultIdentityKeys,
-            devices: [
-              {
-                device_id: 'default',
-                label: 'Web Device',
-                created_at: Date.now(),
-                last_seen_at: Date.now(),
-              },
-            ],
-            conversation_epochs: {},
-            pinned_identities: {},
-            recovery_skipped: false,
-          };
-          const sealed = await this.cryptoPort.sealZKVault(initialPayload, 1);
-          await this.zkVaultPort.saveVault(0, sealed.ciphertextHex, sealed.signatureHex);
-          await this.metadataPort.set('last_seen_vault_version', '1');
-          if (recoveryKeyHex) {
-            await this.metadataPort.set('pending_recovery_key', recoveryKeyHex);
-          }
-        } catch (err) {
-          console.warn('[AuthUseCase] initial zkVault upload best-effort failed:', err);
+        const deviceId = typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : 'device-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+        await this.metadataPort.set('device_id', deviceId);
+
+        const initialPayload: ZeroKnowledgeVaultPayload = {
+          schema_version: 1,
+          user_id: result.user_id,
+          username,
+          identity_keys: vaultIdentityKeys,
+          devices: [
+            {
+              device_id: deviceId,
+              label: 'Web Device',
+              created_at: Date.now(),
+              last_seen_at: Date.now(),
+            },
+          ],
+          conversation_epochs: {},
+          pinned_identities: {},
+          recovery_skipped: false,
+        };
+        const sealed = await this.cryptoPort.sealZKVault(initialPayload, 1);
+        await this.zkVaultPort.saveVault(0, sealed.ciphertextHex, sealed.signatureHex);
+        await this.metadataPort.set('last_seen_vault_version', '1');
+        if (recoveryKeyHex) {
+          await this.metadataPort.set('pending_recovery_key', recoveryKeyHex);
         }
       }
 
       this.emit({
         state: 'authenticated',
-        identityHash: identity.identityHash,
-        publicKey: identity.publicKey,
+        identityHash: identityHashHex,
+        publicKey: identityPublicKey,
         username,
         displayName: displayName || username,
         userId: result.user_id,
@@ -452,44 +457,52 @@ export class AuthUseCase {
         await this.metadataPort.delete('session_keyring');
       }
 
+      let finalIdentityHash = identity.identityHash;
+      let finalPublicKey = identity.publicKey;
+
       // Stage 1a: Download, verify, and decrypt Zero-Knowledge Vault
       if (result.user_id && this.zkVaultPort && this.cryptoPort.openZKVault) {
-        try {
-          const vault = await this.zkVaultPort.getVault();
-          if (vault) {
-            const lastSeen = await this.metadataPort.get('last_seen_vault_version');
-            if (lastSeen) {
-              const lastVer = parseInt(lastSeen, 10);
-              if (!isNaN(lastVer) && vault.version < lastVer) {
-                console.error('[AuthUseCase] Vault rollback detected! Server version:', vault.version, 'Local version:', lastVer);
-                throw new Error('Server rollback detected: vault version is older than local version');
-              }
-            }
-            const payload = await this.cryptoPort.openZKVault(vault.ciphertext, vault.signature, vault.version, vault.user_id);
-            await this.metadataPort.set('last_seen_vault_version', String(vault.version));
-            if (payload && payload.identity_keys && payload.identity_keys.id_sign_pk && payload.identity_keys.id_sign_sk) {
-              if (this.cryptoPort.importIdentityKeys) {
-                await this.cryptoPort.importIdentityKeys({
-                  publicKey: payload.identity_keys.id_sign_pk,
-                  privateKey: payload.identity_keys.id_sign_sk,
-                });
-              }
+        const vault = await this.zkVaultPort.getVault();
+        if (vault) {
+          const lastSeen = await this.metadataPort.get('last_seen_vault_version');
+          if (lastSeen) {
+            const lastVer = parseInt(lastSeen, 10);
+            if (!isNaN(lastVer) && vault.version < lastVer) {
+              console.error('[AuthUseCase] Vault rollback detected! Server version:', vault.version, 'Local version:', lastVer);
+              throw new Error('Server rollback detected: vault version is older than local version');
             }
           }
-        } catch (err) {
-          console.warn('[AuthUseCase] vault sync best-effort failed:', err);
+          const payload = await this.cryptoPort.openZKVault(vault.ciphertext, vault.signature, vault.version, vault.user_id);
+          await this.metadataPort.set('last_seen_vault_version', String(vault.version));
+          if (payload && payload.identity_keys && payload.identity_keys.id_sign_pk && payload.identity_keys.id_sign_sk) {
+            finalPublicKey = payload.identity_keys.id_sign_pk;
+            if (payload.identity_keys.identity_hash) {
+              finalIdentityHash = payload.identity_keys.identity_hash;
+            }
+            if (this.cryptoPort.importIdentityKeys) {
+              await this.cryptoPort.importIdentityKeys({
+                publicKey: payload.identity_keys.id_sign_pk,
+                privateKey: payload.identity_keys.id_sign_sk,
+              });
+            }
+          }
         }
       }
 
       this.emit({
         state: 'authenticated',
-        identityHash: identity.identityHash,
-        publicKey: identity.publicKey,
+        identityHash: finalIdentityHash,
+        publicKey: finalPublicKey,
         username,
         displayName,
         userId: result.user_id,
       });
-    } catch {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('rollback')) {
+        this.emit({ state: 'error', error: 'Security warning: vault rollback detected. Access blocked.' });
+        return;
+      }
       this.emit({ state: 'error', error: 'Authentication failed' });
     }
   }

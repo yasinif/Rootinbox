@@ -285,6 +285,11 @@ async function handleImportIdentityKeys(p: { publicKey: string; privateKey: stri
   _identityPublicKey = pk;
   _identityPrivateKey = sk;
   _identityHashBytes = await identityHash(pk);
+  if (!_ivPrefix) {
+    _ivPrefix = new Uint8Array(4);
+    crypto.getRandomValues(_ivPrefix as ArrayBufferView<ArrayBuffer>);
+  }
+  _outgoingSequence = 0n;
   return {
     status: 'imported',
     publicKey: hexEncode(pk),

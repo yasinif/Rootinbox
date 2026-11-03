@@ -103,11 +103,33 @@ export function createCryptoPort(existingBridge?: CryptoWorkerBridge): CryptoPor
       const signSkBytes = toSodiumBytes(exported.privateKey);
       const dhPkBytes = sodium.crypto_sign_ed25519_pk_to_curve25519(signPkBytes);
       const dhSkBytes = sodium.crypto_sign_ed25519_sk_to_curve25519(signSkBytes);
+      const idHashBytes = sodium.crypto_hash_sha256(signPkBytes);
       return {
         id_sign_pk: exported.publicKey,
         id_sign_sk: exported.privateKey,
         id_dh_pk: sodium.to_hex(dhPkBytes),
         id_dh_sk: sodium.to_hex(dhSkBytes),
+        identity_hash: sodium.to_hex(idHashBytes),
+      };
+    },
+    async generateRandomIdentityKeys(): Promise<VaultIdentityKeys> {
+      await sodium.ready;
+      const keypair = sodium.crypto_sign_keypair();
+      const signPk = keypair.publicKey;
+      const signSk = keypair.privateKey;
+      const dhPk = sodium.crypto_sign_ed25519_pk_to_curve25519(signPk);
+      const dhSk = sodium.crypto_sign_ed25519_sk_to_curve25519(signSk);
+      const signPkHex = sodium.to_hex(signPk);
+      const signSkHex = sodium.to_hex(signSk);
+      const idHashBytes = sodium.crypto_hash_sha256(signPk);
+      const idHashHex = sodium.to_hex(idHashBytes);
+      await bridge.call('importIdentityKeys', { publicKey: signPkHex, privateKey: signSkHex });
+      return {
+        id_sign_pk: signPkHex,
+        id_sign_sk: signSkHex,
+        id_dh_pk: sodium.to_hex(dhPk),
+        id_dh_sk: sodium.to_hex(dhSk),
+        identity_hash: idHashHex,
       };
     },
     async buildRegistrationWire(sessionPK: string, expiresAt: number) {
