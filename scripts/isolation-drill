@@ -123,11 +123,14 @@ docker run -d \
 echo ""
 echo "--- [GATE 3] Cold Start Measurement ---"
 
+# Start persistent prober container to prevent docker run startup overhead from distorting measurement
+docker run -d --name iso-prober --network isolation_test_net curlimages/curl:latest sleep 180 >/dev/null 2>&1 || true
+
 START_NS=$(date +%s%N)
 READY=0
 for i in $(seq 1 100); do
-  # Check readiness from inside the internal network
-  STATUS=$(docker run --rm --network isolation_test_net curlimages/curl:latest -s -o /dev/null -w "%{http_code}" --connect-timeout 1 http://172.29.240.10:8080/ca.crt 2>/dev/null || echo "000")
+  # Check readiness from inside the internal network via persistent prober
+  STATUS=$(docker exec iso-prober curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 http://172.29.240.10:8080/ca.crt 2>/dev/null || echo "000")
   if [ "$STATUS" = "200" ]; then
     END_NS=$(date +%s%N)
     READY=1
@@ -269,7 +272,7 @@ docker run -d \
 # Wait for readiness
 READY_256=0
 for i in $(seq 1 40); do
-  STATUS=$(docker run --rm --network isolation_test_net curlimages/curl:latest -s -o /dev/null -w "%{http_code}" --connect-timeout 1 http://172.29.240.20:8080/ca.crt 2>/dev/null || echo "000")
+  STATUS=$(docker exec iso-prober curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 http://172.29.240.20:8080/ca.crt 2>/dev/null || echo "000")
   if [ "$STATUS" = "200" ]; then
     READY_256=1
     break
@@ -307,6 +310,9 @@ echo "Gate 4 (Zero Outbound Telemetry):      CONFIRMED"
 echo "Gate 5 (Idle RSS with 10 clients):     ${MEM_MB} MB (OOM: ${OOM_KILLED})"
 echo "Gate 6 (Exploratory 256 MB Run):       ${MEM_256_RAW} (OOM: ${OOM_256})"
 echo "======================================================================"
+
+# Clean up prober container
+docker rm -f iso-prober >/dev/null 2>&1 || true
 
 if [ "$FAILED_GATES" -gt 0 ]; then
   echo "[-] DRILL FAILED: $FAILED_GATES gates failed!"

@@ -15,12 +15,30 @@ import type {
   EncryptParams, DecryptParams, StoredMessageDTO, OutboxEntryDTO,
   ConversationDTO, ConversationMemberDTO, GroupMessageDTO, CreateGroupParams,
   PeerInfo, HistoryItemDTO, SessionDTO, DeliveryAckDTO,
+  KdfParamsDTO, ZKVaultDTO, ZKVaultPort, ZeroKnowledgeVaultPayload,
+  VaultIdentityKeys,
 } from '../domain';
+import sodium from 'libsodium-wrappers-sumo';
+import {
+  deriveMasterSeed,
+  deriveAuthKeypair,
+  deriveVaultKey as deriveStage1aVaultKey,
+  deriveRecoveryKey,
+  encryptZKVault,
+  decryptZKVault,
+  buildLoginPayload,
+  buildSessionSigPayload,
+  CRYPTO_SUITE_V1,
+  toSodiumBytes,
+  type AuthKeypairResult,
+} from '../crypto';
 import { mceDisplayText } from '../domain/protocol/content-envelope';
 
 // ─── CryptoPort adapter (via Worker Bridge) ──────────────────
 export function createCryptoPort(existingBridge?: CryptoWorkerBridge): CryptoPort {
   const bridge = existingBridge ?? new CryptoWorkerBridge();
+  let cachedAuthKeypair: AuthKeypairResult | null = null;
+  let cachedVaultKey: Uint8Array | null = null;
 
   return {
     async init(username: string, password: string) {
@@ -42,10 +60,77 @@ export function createCryptoPort(existingBridge?: CryptoWorkerBridge): CryptoPor
       await bridge.call('importSessionKeyring', keys);
     },
     async signSessionKey(sessionPK: string, expiresAt: number) {
+      if (cachedAuthKeypair) {
+        await sodium.ready;
+        const info = await bridge.call('getIdentityInfo') as { identityHash: string; publicKey: string };
+        const idHashBytes = sodium.from_hex(info.identityHash);
+        const sessPKBytes = sessionPK.length === 64
+          ? sodium.from_hex(sessionPK)
+          : sodium.from_base64(sessionPK, sodium.base64_variants.URLSAFE_NO_PADDING);
+        const payload = buildSessionSigPayload(CRYPTO_SUITE_V1, sessPKBytes, BigInt(expiresAt), idHashBytes);
+        const sig = sodium.crypto_sign_detached(toSodiumBytes(payload), toSodiumBytes(cachedAuthKeypair.authPrivateKeyBytes));
+        return {
+          signature: sodium.to_base64(sig, sodium.base64_variants.URLSAFE_NO_PADDING),
+          signatureHex: sodium.to_hex(sig),
+        };
+      }
       return bridge.call('signSessionKey', { sessionPK, expiresAt }) as Promise<{ signature: string; signatureHex: string }>;
     },
     async signLoginPayload(nonce: string, sessionPK: string, challengeId: string) {
+      if (cachedAuthKeypair) {
+        await sodium.ready;
+        const nonceBytes = sodium.from_base64(nonce, sodium.base64_variants.URLSAFE_NO_PADDING);
+        const sessPKBytes = sessionPK.length === 64
+          ? sodium.from_hex(sessionPK)
+          : sodium.from_base64(sessionPK, sodium.base64_variants.URLSAFE_NO_PADDING);
+        const chalIdBytes = sodium.from_base64(challengeId, sodium.base64_variants.URLSAFE_NO_PADDING);
+        const payload = buildLoginPayload(nonceBytes, sessPKBytes, chalIdBytes);
+        const sig = sodium.crypto_sign_detached(toSodiumBytes(payload), toSodiumBytes(cachedAuthKeypair.authPrivateKeyBytes));
+        return { signature: sodium.to_base64(sig, sodium.base64_variants.URLSAFE_NO_PADDING) };
+      }
       return bridge.call('signLoginPayload', { nonce, sessionPK, challengeId }) as Promise<{ signature: string }>;
+    },
+    async exportIdentityKeys() {
+      return bridge.call('exportIdentityKeys') as Promise<{ publicKey: string; privateKey: string }>;
+    },
+    async importIdentityKeys(keys: { publicKey: string; privateKey: string }) {
+      await bridge.call('importIdentityKeys', keys);
+    },
+    async getVaultIdentityKeys(): Promise<VaultIdentityKeys> {
+      await sodium.ready;
+      const exported = await bridge.call('exportIdentityKeys') as { publicKey: string; privateKey: string };
+      const signPkBytes = toSodiumBytes(exported.publicKey);
+      const signSkBytes = toSodiumBytes(exported.privateKey);
+      const dhPkBytes = sodium.crypto_sign_ed25519_pk_to_curve25519(signPkBytes);
+      const dhSkBytes = sodium.crypto_sign_ed25519_sk_to_curve25519(signSkBytes);
+      const idHashBytes = sodium.crypto_hash_sha256(signPkBytes);
+      return {
+        id_sign_pk: exported.publicKey,
+        id_sign_sk: exported.privateKey,
+        id_dh_pk: sodium.to_hex(dhPkBytes),
+        id_dh_sk: sodium.to_hex(dhSkBytes),
+        identity_hash: sodium.to_hex(idHashBytes),
+      };
+    },
+    async generateRandomIdentityKeys(): Promise<VaultIdentityKeys> {
+      await sodium.ready;
+      const keypair = sodium.crypto_sign_keypair();
+      const signPk = keypair.publicKey;
+      const signSk = keypair.privateKey;
+      const dhPk = sodium.crypto_sign_ed25519_pk_to_curve25519(signPk);
+      const dhSk = sodium.crypto_sign_ed25519_sk_to_curve25519(signSk);
+      const signPkHex = sodium.to_hex(signPk);
+      const signSkHex = sodium.to_hex(signSk);
+      const idHashBytes = sodium.crypto_hash_sha256(signPk);
+      const idHashHex = sodium.to_hex(idHashBytes);
+      await bridge.call('importIdentityKeys', { publicKey: signPkHex, privateKey: signSkHex });
+      return {
+        id_sign_pk: signPkHex,
+        id_sign_sk: signSkHex,
+        id_dh_pk: sodium.to_hex(dhPk),
+        id_dh_sk: sodium.to_hex(dhSk),
+        identity_hash: idHashHex,
+      };
     },
     async buildRegistrationWire(sessionPK: string, expiresAt: number) {
       return bridge.call('buildRegistrationWire', { sessionPK, expiresAt }) as Promise<{ wireBytes: Uint8Array; wireLength: number }>;
@@ -84,7 +169,63 @@ export function createCryptoPort(existingBridge?: CryptoWorkerBridge): CryptoPor
     async clearKeys() {
       await bridge.call('clearKeys');
     },
+    async deriveStage1aKeys(password: string, saltHexOrB64?: string) {
+      await sodium.ready;
+      let salt: Uint8Array;
+      if (saltHexOrB64) {
+        try {
+          salt = sodium.from_hex(saltHexOrB64);
+        } catch {
+          try {
+            salt = sodium.from_base64(saltHexOrB64, sodium.base64_variants.URLSAFE_NO_PADDING);
+          } catch {
+            salt = new TextEncoder().encode(saltHexOrB64);
+          }
+        }
+      } else {
+        salt = sodium.randombytes_buf(32);
+      }
+
+      const masterSeed = await deriveMasterSeed(password, { salt });
+      const authKeypair = await deriveAuthKeypair(masterSeed);
+      const vaultKey = await deriveStage1aVaultKey(masterSeed);
+      const recoveryKey = await deriveRecoveryKey(masterSeed);
+
+      cachedAuthKeypair = authKeypair;
+      cachedVaultKey = vaultKey;
+
+      return {
+        authPubkey: authKeypair.authPublicKey,
+        salt: sodium.to_hex(salt),
+        recoveryKeyHex: sodium.to_hex(recoveryKey),
+      };
+    },
+    async sealZKVault(payload: ZeroKnowledgeVaultPayload, version: number) {
+      if (!cachedVaultKey || !cachedAuthKeypair) {
+        throw new Error('Stage 1a keys not derived. Call deriveStage1aKeys first.');
+      }
+      const sealed = await encryptZKVault(payload, cachedVaultKey, cachedAuthKeypair.authPrivateKeyBytes, version);
+      return {
+        ciphertextHex: sealed.ciphertext,
+        signatureHex: sealed.signature,
+      };
+    },
+    async openZKVault(ciphertextHex: string, _signatureHex: string, version: number, userId: string) {
+      if (!cachedVaultKey || !cachedAuthKeypair) {
+        throw new Error('Stage 1a keys not derived. Call deriveStage1aKeys first.');
+      }
+      return decryptZKVault(ciphertextHex, cachedVaultKey, userId, version);
+    },
     async destroy() {
+      if (cachedAuthKeypair) {
+        cachedAuthKeypair.authPrivateKeyBytes.fill(0);
+        cachedAuthKeypair.authPublicKeyBytes.fill(0);
+        cachedAuthKeypair = null;
+      }
+      if (cachedVaultKey) {
+        cachedVaultKey.fill(0);
+        cachedVaultKey = null;
+      }
       await bridge.call('destroy');
     },
   };
@@ -115,15 +256,30 @@ export function createAuthPort(): AuthPort {
       );
       return { nonce: resp.data.nonce, challengeId: resp.data.challenge_id };
     },
-    async register(wireBytes: Uint8Array, username?: string, displayName?: string, rememberMe?: boolean) {
+    async getKdfParams(username: string): Promise<KdfParamsDTO> {
+      const resp = await apiGet<KdfParamsDTO>(`/api/v1/auth/kdf-params?username=${encodeURIComponent(username)}`);
+      return resp.data;
+    },
+    async register(
+      wireBytes: Uint8Array,
+      username?: string,
+      displayName?: string,
+      rememberMe?: boolean,
+      authPubkey?: string,
+      kdfSalt?: string,
+    ) {
       const params = new URLSearchParams();
       if (username) params.set('username', username);
       if (displayName) params.set('display_name', displayName);
       if (rememberMe !== undefined) params.set('remember_me', String(rememberMe));
       const url = params.toString() ? `/api/v1/auth/register?${params.toString()}` : '/api/v1/auth/register';
+      const headers: Record<string, string> = {};
+      if (authPubkey) headers['X-Auth-Pubkey'] = authPubkey;
+      if (kdfSalt) headers['X-KDF-Salt'] = kdfSalt;
       const resp = await apiPostBinary<{ user_id: string; session_id: string; session_token?: string; token?: string; identity_hash?: string }>(
         url,
         wireBytes,
+        headers,
       );
       const token = resp.data.session_token || resp.data.token || resp.data.session_id;
       setAuthToken(token);
@@ -807,6 +963,34 @@ export function createVaultArchivePort(): VaultArchivePort {
     list: listVaultArchives,
     download: downloadVaultArchive,
     upload: uploadVaultArchive,
+  };
+}
+
+// ─── ZKVaultPort adapter (Stage 1a) ──────────────────────────
+export function createZKVaultPort(): ZKVaultPort {
+  return {
+    async getVault(): Promise<ZKVaultDTO | null> {
+      try {
+        const resp = await apiGet<ZKVaultDTO>('/api/v1/vault/current');
+        return resp.data;
+      } catch (err: unknown) {
+        if (err && typeof err === 'object' && 'status' in err && (err as { status: number }).status === 404) {
+          return null;
+        }
+        if (err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === 'VAULT_003') {
+          return null;
+        }
+        throw err;
+      }
+    },
+    async saveVault(expectedVersion: number, ciphertextHex: string, signatureHex: string): Promise<ZKVaultDTO> {
+      const resp = await apiPut<ZKVaultDTO>('/api/v1/vault/current', {
+        expected_version: expectedVersion,
+        ciphertext: ciphertextHex,
+        signature: signatureHex,
+      });
+      return resp.data;
+    },
   };
 }
 

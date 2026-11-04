@@ -126,6 +126,8 @@ async function handleAction(action: string, payload: unknown): Promise<unknown> 
     case 'exportSessionKeys': return handleExportSessionKeys();
     case 'importSessionKeys': return handleImportSessionKeys(payload as { publicKey: string; privateKey: string; sessionId?: string });
     case 'importSessionKeyring': return handleImportSessionKeyring(payload as Array<{ publicKey: string; privateKey: string; sessionId?: string }>);
+    case 'exportIdentityKeys': return handleExportIdentityKeys();
+    case 'importIdentityKeys': return handleImportIdentityKeys(payload as { publicKey: string; privateKey: string });
     case 'signSessionKey': return handleSignSessionKey(payload as { sessionPK: string; expiresAt: number });
     case 'signLoginPayload': return handleSignLoginPayload(payload as { nonce: string; sessionPK: string; challengeId: string });
     case 'buildRegistrationWire': return handleBuildRegistrationWire(payload as { sessionPK: string; expiresAt: number });
@@ -265,6 +267,33 @@ async function handleImportSessionKeyring(keys: Array<{ publicKey: string; priva
     }
   }
   return { ok: true, count: _sessionKeyring.size };
+}
+
+function handleExportIdentityKeys(): unknown {
+  if (!_identityPublicKey || !_identityPrivateKey) {
+    throw new Error('Not initialized');
+  }
+  return {
+    publicKey: hexEncode(_identityPublicKey),
+    privateKey: hexEncode(_identityPrivateKey),
+  };
+}
+
+async function handleImportIdentityKeys(p: { publicKey: string; privateKey: string }): Promise<unknown> {
+  const pk = hexDecode(p.publicKey);
+  const sk = hexDecode(p.privateKey);
+  _identityPublicKey = pk;
+  _identityPrivateKey = sk;
+  _identityHashBytes = await identityHash(pk);
+  if (!_ivPrefix) {
+    _ivPrefix = new Uint8Array(4);
+    crypto.getRandomValues(_ivPrefix as ArrayBufferView<ArrayBuffer>);
+  }
+  return {
+    status: 'imported',
+    publicKey: hexEncode(pk),
+    identityHash: hexEncode(_identityHashBytes),
+  };
 }
 
 async function handleSignSessionKey(p: { sessionPK: string; expiresAt: number }): Promise<unknown> {

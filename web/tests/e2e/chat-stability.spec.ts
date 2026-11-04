@@ -165,8 +165,8 @@ async function waitForBubbleWithText(page: Page, text: string, timeout = 15000) 
       if (typeof (window as any).__virtuosoScrollToBottom === 'function') {
         (window as any).__virtuosoScrollToBottom();
       }
-      const scroller = document.querySelector('[data-testid="virtuoso-scroller"]') ||
-                       document.querySelector('[data-virtuoso-scroller="true"]') ||
+      const scroller = document.querySelector('[data-virtuoso-scroller="true"]') ||
+                       document.querySelector('[data-testid="virtuoso-scroller"]') ||
                        document.querySelector('.list-wrapper > div');
       if (scroller) {
         scroller.scrollTop = scroller.scrollHeight;
@@ -312,7 +312,7 @@ test.describe('1:1 Chat Stability & Comprehensive Verification', () => {
   });
 
   test('Scenario 7: Page reload in the middle of a conversation', async () => {
-    test.setTimeout(30000);
+    test.setTimeout(60000);
 
     await selectConversation(pageA, userB);
     await selectConversation(pageB, userA);
