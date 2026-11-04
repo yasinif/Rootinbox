@@ -129,18 +129,17 @@ describe('Stage 1a Auth & ZK-Vault Integration', () => {
       'auth-pubkey-hex',
       'mock-salt-hex',
     );
-    expect(mockCryptoPort.generateRandomIdentityKeys).toHaveBeenCalled();
+    expect(mockCryptoPort.getVaultIdentityKeys).toHaveBeenCalled();
     expect(mockCryptoPort.sealZKVault).toHaveBeenCalledWith(
       expect.objectContaining({
         schema_version: 1,
         user_id: 'user-alice-123',
         username: 'alice',
         identity_keys: {
-          id_sign_pk: 'mock-random-id-pk',
-          id_sign_sk: 'mock-random-id-sk',
-          id_dh_pk: 'mock-random-dh-pk',
-          id_dh_sk: 'mock-random-dh-sk',
-          identity_hash: 'mock-random-id-hash',
+          id_sign_pk: 'mock-id-pk',
+          id_sign_sk: 'mock-id-sk',
+          id_dh_pk: 'mock-dh-pk',
+          id_dh_sk: 'mock-dh-sk',
         },
         devices: expect.arrayContaining([
           expect.objectContaining({

@@ -145,6 +145,14 @@ export class AuthUseCase {
       await this.metadataPort.delete('session_keyring');
       await this.metadataPort.delete('active_session_keypair');
 
+      // 1. Init crypto worker (derive identity key).
+      const identity = await this.cryptoPort.init(username, password);
+
+      // 1b. Derive Vault Key (Argon2id with username || 'VAULT').
+      if (this.cryptoPort.deriveVaultKey) {
+        await this.cryptoPort.deriveVaultKey(username, password);
+      }
+
       // Stage 1a: Derive KDF master seed, auth keypair, vault key, recovery key
       let authPubkey: string | undefined;
       let kdfSalt: string | undefined;
@@ -156,32 +164,21 @@ export class AuthUseCase {
         recoveryKeyHex = keys.recoveryKeyHex;
       }
 
-      let vaultIdentityKeys: VaultIdentityKeys;
-      let identityPublicKey: string;
-      let identityHashHex: string;
-
-      if (this.cryptoPort.generateRandomIdentityKeys) {
-        // Stage 1a: Generate RANDOM identity keypair (Ed25519 + X25519) on client
-        vaultIdentityKeys = await this.cryptoPort.generateRandomIdentityKeys();
-        identityPublicKey = vaultIdentityKeys.id_sign_pk;
-        identityHashHex = vaultIdentityKeys.identity_hash || identityPublicKey;
-      } else {
-        // Legacy fallback
-        const identity = await this.cryptoPort.init(username, password);
-        identityPublicKey = identity.publicKey;
-        identityHashHex = identity.identityHash;
-        if (this.cryptoPort.deriveVaultKey) {
-          await this.cryptoPort.deriveVaultKey(username, password);
+      let vaultIdentityKeys: VaultIdentityKeys = {
+        id_sign_pk: identity.publicKey,
+        id_sign_sk: '',
+        id_dh_pk: '',
+        id_dh_sk: '',
+      };
+      if (this.cryptoPort.getVaultIdentityKeys) {
+        try {
+          vaultIdentityKeys = await this.cryptoPort.getVaultIdentityKeys();
+        } catch (err) {
+          console.warn('[AuthUseCase] getVaultIdentityKeys failed:', err);
         }
-        vaultIdentityKeys = this.cryptoPort.getVaultIdentityKeys
-          ? await this.cryptoPort.getVaultIdentityKeys()
-          : {
-              id_sign_pk: identity.publicKey,
-              id_sign_sk: '',
-              id_dh_pk: '',
-              id_dh_sk: '',
-            };
       }
+      const identityPublicKey = identity.publicKey;
+      const identityHashHex = identity.identityHash;
 
       // 1c. Remember Keys (RFC-0003 §8.3): Persist keys wrapped with non-extractable AES-GCM wrapping key
       // If rememberMe is true, persist keys in IndexedDB keyring; if false, ensure keyring is cleared.
