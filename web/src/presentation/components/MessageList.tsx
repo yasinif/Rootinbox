@@ -270,15 +270,24 @@ export function MessageList({ conversationId }: MessageListProps) {
   }, [filtered, conversationId, firstUnreadIndex, identityHash]);
 
   // Expose scroll-to-bottom helper for testing and virtualizer sync
+  const filteredLengthRef = useRef(filtered.length);
+  filteredLengthRef.current = filtered.length;
+
   useEffect(() => {
     if (import.meta.env.VITE_E2E === 'true' && typeof window !== 'undefined') {
       (window as unknown as Record<string, unknown>).__virtuosoScrollToBottom = () => {
-        if (virtuosoRef.current && filtered.length > 0) {
+        if (virtuosoRef.current && filteredLengthRef.current > 0) {
           virtuosoRef.current.scrollToIndex({
-            index: filtered.length - 1,
+            index: filteredLengthRef.current - 1,
             align: 'end',
             behavior: 'auto',
           });
+        }
+        const scroller = document.querySelector('[data-virtuoso-scroller="true"]') ||
+                         document.querySelector('[data-testid="virtuoso-scroller"]');
+        if (scroller) {
+          scroller.scrollTop = scroller.scrollHeight;
+          scroller.dispatchEvent(new Event('scroll'));
         }
       };
     }
@@ -287,7 +296,7 @@ export function MessageList({ conversationId }: MessageListProps) {
         delete (window as unknown as Record<string, unknown>).__virtuosoScrollToBottom;
       }
     };
-  }, [filtered.length]);
+  }, []);
 
   // Load peer profile (display_name, last_name, bio)
   useEffect(() => {

@@ -289,7 +289,6 @@ async function handleImportIdentityKeys(p: { publicKey: string; privateKey: stri
     _ivPrefix = new Uint8Array(4);
     crypto.getRandomValues(_ivPrefix as ArrayBufferView<ArrayBuffer>);
   }
-  _outgoingSequence = 0n;
   return {
     status: 'imported',
     publicKey: hexEncode(pk),
