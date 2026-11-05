@@ -2,10 +2,15 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"golang.org/x/crypto/hkdf"
 
 	"rootinbox/internal/domain"
 	"rootinbox/internal/usecase"
@@ -97,6 +102,17 @@ func TestHandleKDFParams(t *testing.T) {
 			t.Errorf("expected 32 hex char fake salt, got length %d: %s", len(resp1.Data.Salt), resp1.Data.Salt)
 		}
 
+		// Verify that fake salt matches HKDF derivation with "rootinbox/kdf-fake-salt/v1:" + canonical
+		expectedBuf := make([]byte, 16)
+		kdfR := hkdf.Expand(sha256.New, []byte("test-anti-enumeration-secret-1234"), []byte("rootinbox/kdf-fake-salt/v1:bob_nonexistent"))
+		if _, err := io.ReadFull(kdfR, expectedBuf); err != nil {
+			t.Fatalf("failed to derive expected hkdf: %v", err)
+		}
+		expectedHex := hex.EncodeToString(expectedBuf)
+		if resp1.Data.Salt != expectedHex {
+			t.Errorf("expected fake salt %s, got %s", expectedHex, resp1.Data.Salt)
+		}
+
 		// Query again for bob_nonexistent to assert deterministic fake salt
 		req2 := httptest.NewRequest(http.MethodGet, "/api/v1/auth/kdf-params?username=bob_nonexistent", nil)
 		rec2 := httptest.NewRecorder()
@@ -111,6 +127,27 @@ func TestHandleKDFParams(t *testing.T) {
 
 		if resp1.Data.Salt != resp2.Data.Salt {
 			t.Errorf("expected deterministic fake salt for identical unknown username, got %s vs %s", resp1.Data.Salt, resp2.Data.Salt)
+		}
+	})
+
+	t.Run("Server salt secret missing returns SYS_001", func(t *testing.T) {
+		unconfiguredUC := usecase.NewAuthUseCase(userRepo, nil, nil, nil, nil, nil, nil, &testLogger{}, nil)
+		unconfiguredHandler := NewAuthHandler(unconfiguredUC)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/kdf-params?username=bob_nonexistent", nil)
+		rec := httptest.NewRecorder()
+		unconfiguredHandler.HandleKDFParams()(rec, req)
+
+		var errResp struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &errResp)
+
+		if errResp.Error.Code != "SYS_001" {
+			t.Fatalf("expected error code SYS_001, got %s (status %d): %s", errResp.Error.Code, rec.Code, rec.Body.String())
 		}
 	})
 

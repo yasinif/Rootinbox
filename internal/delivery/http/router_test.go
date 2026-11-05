@@ -10,6 +10,7 @@ import (
 
 	"rootinbox/internal/config"
 	"rootinbox/internal/domain"
+	"rootinbox/internal/usecase"
 )
 
 type mockLimiter struct{}
@@ -70,4 +71,41 @@ func TestRouter_T_WS_1(t *testing.T) {
 	}
 
 	t.Log("T-WS-1 verified")
+}
+
+type capturingLimiter struct {
+	lastRouteClass domain.RouteClass
+}
+
+func (c *capturingLimiter) Allow(ctx context.Context, class domain.RouteClass, identity string, userID string) bool {
+	c.lastRouteClass = class
+	return true
+}
+
+func TestRouter_AuthRouteClass(t *testing.T) {
+	limiter := &capturingLimiter{}
+	authUC := usecase.NewAuthUseCase(newMockUserRepo(), nil, nil, nil, nil, nil, nil, &testLogger{}, nil)
+	authUC.SetServerSaltSecret([]byte("test-salt-secret-0000111122223333"))
+	authHandler := NewAuthHandler(authUC)
+
+	deps := RouterDeps{
+		Cfg:              &config.Config{},
+		RateLimiter:      limiter,
+		IPBlocks:         &mockIPBlockCache{},
+		Auditor:          &mockAuditor{},
+		AuthFailCoalesce: &mockAuthFail{},
+		AuthHandler:      authHandler,
+		Logger:           slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	router := NewRouter(deps)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/kdf-params?username=alice", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if limiter.lastRouteClass.Name != domain.RouteClassAuthUnauthenticated.Name {
+		t.Fatalf("expected RouteClassAuthUnauthenticated (%s), got %s",
+			domain.RouteClassAuthUnauthenticated.Name, limiter.lastRouteClass.Name)
+	}
 }
