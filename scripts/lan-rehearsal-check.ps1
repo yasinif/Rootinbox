@@ -70,16 +70,16 @@ Test-Probe -Name "HTTP Onboarding Guide Page (http://${LanIp}:${OnboardingPort}/
 
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 
-# 3. Probe HTTPS Health Check (/healthz) with Self-Signed Certificate
-Test-Probe -Name "HTTPS Health Check (https://${LanIp}:${Port}/healthz)" -Action {
+# 3. Probe HTTPS Health Readiness (/health/ready) with Self-Signed Certificate
+Test-Probe -Name "HTTPS Health Readiness (https://${LanIp}:${Port}/health/ready)" -Action {
     if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        $code = & curl.exe -k -s -w "%{http_code}" -o NUL --connect-timeout $TimeoutSec "https://${LanIp}:${Port}/healthz"
-        if ($code -ne "200") {
-            throw "Unexpected HTTP status: $code"
+        $body = & curl.exe -k -s --connect-timeout $TimeoutSec "https://${LanIp}:${Port}/health/ready"
+        if ($body -notmatch '"status"\s*:\s*"pass"') {
+            throw "Health readiness response missing status pass: $body"
         }
-        return "HTTP $code OK (verified via curl)"
+        return "HTTP 200 OK, JSON status 'pass' verified"
     } else {
-        $uri = "https://${LanIp}:${Port}/healthz"
+        $uri = "https://${LanIp}:${Port}/health/ready"
         $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
         try {
             [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
@@ -87,7 +87,34 @@ Test-Probe -Name "HTTPS Health Check (https://${LanIp}:${Port}/healthz)" -Action
             if ($res.StatusCode -ne 200) {
                 throw "Unexpected status code $($res.StatusCode)"
             }
-            return "$($res.StatusCode) OK, Payload: $(($res.Content | Out-String).Trim())"
+            if ($res.Content -notmatch '"status"\s*:\s*"pass"') {
+                throw "Health readiness response missing status pass: $($res.Content)"
+            }
+            return "$($res.StatusCode) OK, JSON status 'pass' verified"
+        } finally {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
+        }
+    }
+}
+
+# 3b. Verify /healthz is NOT an API health endpoint (guards against vacuous SPA fallback)
+Test-Probe -Name "Verify /healthz is not an API health endpoint" -Action {
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        $body = & curl.exe -k -s --connect-timeout $TimeoutSec "https://${LanIp}:${Port}/healthz"
+        if ($body -match '"status"\s*:\s*"pass"') {
+            throw "Expected /healthz to NOT return JSON status pass"
+        }
+        return "Verified: /healthz does not return API status pass (/health/ready is the authoritative probe)"
+    } else {
+        $uri = "https://${LanIp}:${Port}/healthz"
+        $originalCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        try {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+            $res = Invoke-WebRequest -Uri $uri -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+            if ($res.Content -match '"status"\s*:\s*"pass"') {
+                throw "Expected /healthz to NOT return JSON status pass"
+            }
+            return "Verified: /healthz does not return API status pass"
         } finally {
             [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCallback
         }

@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -24,6 +25,13 @@ import (
 
 	"rootinbox/internal/config"
 )
+
+// computeSubjectKeyID derives the RFC 5280 160-bit SHA-1 Subject Key Identifier (SKI) from an ECDSA public key.
+func computeSubjectKeyID(pub *ecdsa.PublicKey) []byte {
+	pubBytes := elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+	skid := sha1.Sum(pubBytes)
+	return skid[:]
+}
 
 // CertificateValidityDays is 820 days, strictly under the 825-day Apple iOS limit.
 const CertificateValidityDays = 820
@@ -248,6 +256,7 @@ func (m *Manager) generateCA(certPath, keyPath string) error {
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
+		SubjectKeyId:          computeSubjectKeyID(&caPrivKey.PublicKey),
 	}
 
 	// Name constraints to PUBLIC_HOST
@@ -319,6 +328,13 @@ func (m *Manager) generateServerCert(certPath, keyPath string) error {
 	// iOS rejects certificates valid for longer than 825 days
 	notAfter := notBefore.Add(CertificateValidityDays * 24 * time.Hour)
 
+	authorityKeyID := m.caCert.SubjectKeyId
+	if len(authorityKeyID) == 0 {
+		if caPub, ok := m.caCert.PublicKey.(*ecdsa.PublicKey); ok {
+			authorityKeyID = computeSubjectKeyID(caPub)
+		}
+	}
+
 	serverTemplate := x509.Certificate{
 		SerialNumber: serverSerial,
 		Subject: pkix.Name{
@@ -327,10 +343,12 @@ func (m *Manager) generateServerCert(certPath, keyPath string) error {
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  false,
+		SubjectKeyId:          computeSubjectKeyID(&serverPrivKey.PublicKey),
+		AuthorityKeyId:        authorityKeyID,
 	}
 
 	if ip := net.ParseIP(publicHost); ip != nil {
@@ -396,6 +414,12 @@ func (m *Manager) validateServerCert(cert *x509.Certificate) bool {
 	}
 
 	publicHost := m.cfg.TLS.PublicHost
+
+	// Apple requirements: ECDSA leaf MUST NOT have KeyEncipherment and MUST have SubjectKeyId.
+	if cert.KeyUsage&x509.KeyUsageKeyEncipherment != 0 || len(cert.SubjectKeyId) == 0 {
+		m.logger.Warn("existing server certificate does not meet Apple platform requirements (has KeyEncipherment or missing SubjectKeyId); regenerating")
+		return false
+	}
 
 	// Check validity
 	if time.Until(cert.NotAfter) < RenewalThresholdDays*24*time.Hour {
@@ -672,13 +696,19 @@ func (m *Manager) OnboardingHandler() http.Handler {
       </ol>
     </div>
 
+    <!-- Truthful Encryption Notice -->
+    <div class="step-box" style="border-left-color: #38bdf8;">
+      <b>اطلاعیه وضعیت رمزنگاری:</b> ارتباطات در طول مسیر با HTTPS محافظت می‌شوند. رمزنگاری سرتاسری E2EE در فازهای بعدی فعال خواهد شد.
+    </div>
+
     <div style="text-align: center; margin-top: 32px;">
-      <p>پس از انجام مراحل فوق، دکمه زیر را لمس کنید تا چت با پروتکل امن باز شود:</p>
+      <p>پیش از ورود می‌توانید آمادگی مرورگر و دستگاه خود را ارزیابی کنید:</p>
+      <a href="%s/device-check" class="btn" style="background: #475569; margin-left: 8px;">🔍 بررسی پیش‌نیازهای دستگاه (Device Check)</a>
       <a href="%s" class="btn btn-green">🚀 ورود به پیام‌رسان RootInbox (HTTPS)</a>
     </div>
   </div>
 </body>
-</html>`, publicHost, caFingerprint, publicHost, httpsURL)
+</html>`, publicHost, caFingerprint, publicHost, httpsURL, httpsURL)
 
 		_, _ = io.WriteString(w, html)
 	})

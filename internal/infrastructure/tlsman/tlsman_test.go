@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -600,5 +601,106 @@ func TestREADME_Fa_Documentation(t *testing.T) {
 	// 4. Voice call fingerprint verification
 	if !strings.Contains(text, "تماس صوتی") {
 		t.Fatalf("README-fa.md missing voice call fingerprint verification note")
+	}
+}
+
+func TestTLSManager_ApplePlatformRequirements(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8443},
+		TLS: config.TLSConfig{
+			Mode:           "selfsigned",
+			PublicHost:     "192.168.1.50",
+			DataDir:        tempDir,
+			OnboardingPort: 8080,
+		},
+	}
+
+	mgr, err := tlsman.NewManager(cfg, newTestLogger())
+	if err != nil {
+		t.Fatalf("failed to create TLS manager: %v", err)
+	}
+
+	caCert := mgr.CACert()
+	if caCert == nil {
+		t.Fatal("expected non-nil CA cert")
+	}
+	if len(caCert.SubjectKeyId) == 0 {
+		t.Fatal("CA certificate missing SubjectKeyId (Apple requirement)")
+	}
+
+	serverCert := mgr.ServerCert()
+	if serverCert == nil {
+		t.Fatal("expected non-nil server certificate")
+	}
+
+	// 1. Validity strictly <= 820 days
+	validity := serverCert.NotAfter.Sub(serverCert.NotBefore)
+	maxValidity := 820 * 24 * time.Hour
+	if validity > maxValidity+2*time.Hour { // slight skew allowance for NotBefore backdating
+		t.Fatalf("leaf validity %v exceeds maximum 820 days (%v)", validity, maxValidity)
+	}
+
+	// 2. SAN matches public host
+	expectedIP := net.ParseIP("192.168.1.50")
+	foundSAN := false
+	for _, ip := range serverCert.IPAddresses {
+		if ip.Equal(expectedIP) {
+			foundSAN = true
+			break
+		}
+	}
+	if !foundSAN {
+		t.Fatalf("leaf cert missing SAN IP %v, got %v", expectedIP, serverCert.IPAddresses)
+	}
+
+	// 3. EKU includes ExtKeyUsageServerAuth
+	foundServerAuth := false
+	for _, eku := range serverCert.ExtKeyUsage {
+		if eku == x509.ExtKeyUsageServerAuth {
+			foundServerAuth = true
+			break
+		}
+	}
+	if !foundServerAuth {
+		t.Fatal("leaf cert missing ExtKeyUsageServerAuth")
+	}
+
+	// 4. ECDSA P-256 key
+	if serverCert.PublicKeyAlgorithm != x509.ECDSA {
+		t.Fatalf("leaf cert key algorithm is not ECDSA, got %v", serverCert.PublicKeyAlgorithm)
+	}
+
+	// 5. KeyUsage has KeyUsageDigitalSignature and MUST NOT have KeyUsageKeyEncipherment
+	if serverCert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		t.Fatal("leaf cert missing KeyUsageDigitalSignature")
+	}
+	if serverCert.KeyUsage&x509.KeyUsageKeyEncipherment != 0 {
+		t.Fatal("leaf cert MUST NOT have KeyUsageKeyEncipherment on ECDSA (Apple requirement)")
+	}
+
+	// 6. SubjectKeyId on leaf
+	if len(serverCert.SubjectKeyId) == 0 {
+		t.Fatal("leaf cert missing SubjectKeyId (Apple requirement)")
+	}
+
+	// 7. AuthorityKeyId on leaf matching CA SubjectKeyId
+	if len(serverCert.AuthorityKeyId) == 0 {
+		t.Fatal("leaf cert missing AuthorityKeyId (Apple requirement)")
+	}
+	if string(serverCert.AuthorityKeyId) != string(caCert.SubjectKeyId) {
+		t.Fatalf("leaf AuthorityKeyId (%x) does not match CA SubjectKeyId (%x)",
+			serverCert.AuthorityKeyId, caCert.SubjectKeyId)
+	}
+
+	// 8. OpenSSL strict validation with -purpose sslserver and -x509_strict
+	if opensslPath, err := exec.LookPath("openssl"); err == nil {
+		caCertPath := filepath.Join(tempDir, "ca.crt")
+		serverCertPath := filepath.Join(tempDir, "server.crt")
+		cmd := exec.Command(opensslPath, "verify", "-x509_strict", "-purpose", "sslserver", "-CAfile", caCertPath, serverCertPath)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("openssl verify -x509_strict -purpose sslserver failed: %v, output: %s", err, string(out))
+		}
 	}
 }

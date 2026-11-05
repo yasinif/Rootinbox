@@ -37,7 +37,7 @@ jobs:
       - name: Ensure embedded dist placeholder exists
         run: |
           mkdir -p web/dist
-          touch web/dist/index.html web/dist/manifest.webmanifest web/dist/manifest.json web/dist/favicon.ico web/dist/sw.js
+          touch web/dist/index.html web/dist/manifest.webmanifest web/dist/manifest.json web/dist/favicon.ico web/dist/sw.js web/dist/device-check.html
 
       - name: Check code formatting on changed Go files
         run: |
@@ -92,6 +92,10 @@ jobs:
         working-directory: web
         run: npm run build
 
+      - name: Verify build syntax compatibility (es-check)
+        working-directory: web
+        run: npm run check-syntax
+
       - name: Verify no test seams leaked into production dist
         run: |
           if grep -rnE '__authUC|__chatUC|__syncUC|__selectConv|__msgPort|__outboxPort|__uploadMediaUC|__getWsState|__virtuosoScrollToBottom|__forceRelayOnly|__activeCallPC' web/dist/; then
@@ -125,7 +129,7 @@ jobs:
       - name: Ensure embedded dist placeholder exists
         run: |
           mkdir -p web/dist
-          touch web/dist/index.html web/dist/manifest.webmanifest web/dist/manifest.json web/dist/favicon.ico web/dist/sw.js
+          touch web/dist/index.html web/dist/manifest.webmanifest web/dist/manifest.json web/dist/favicon.ico web/dist/sw.js web/dist/device-check.html
 
       - name: Run Zero-Knowledge Forensic Audit
         continue-on-error: true

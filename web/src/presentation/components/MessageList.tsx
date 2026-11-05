@@ -1455,7 +1455,7 @@ export function MessageList({ conversationId }: MessageListProps) {
               setShowAttachmentMenu((prev) => !prev);
             }}
             className="attach-btn"
-            title={isGroupOrChannel ? 'Attach file or image' : 'Attach file, image, or document (E2EE encrypted)'}
+            title={isGroupOrChannel ? 'Attach file or image' : 'Attach file, image, or document (Protected in transit via HTTPS)'}
           >
             📎
           </button>

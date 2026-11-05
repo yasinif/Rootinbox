@@ -224,10 +224,11 @@ Run-Step -Id "06-web-lint" -Name "web npm run lint" -Action {
 }
 
 # Step 7: web build
-Run-Step -Id "07-web-build" -Name "web npm run build" -Action {
+Run-Step -Id "07-web-build" -Name "web npm run build and check-syntax" -Action {
     Push-Location web
     try {
         npm run build
+        npm run check-syntax
     } finally {
         Pop-Location
     }

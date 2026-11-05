@@ -205,6 +205,8 @@ Write-Host "[*] Launching RootInbox server on $selectedIp (HTTPS: $Port, Onboard
     $psi.WorkingDirectory = (Resolve-Path .).Path
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
 
     $psi.EnvironmentVariables["SERVER_HOST"] = "0.0.0.0"
     $psi.EnvironmentVariables["PORT"] = "$Port"
@@ -232,6 +234,35 @@ if ($null -eq $serverProc -or $serverProc.HasExited) {
 }
 
 $serverProc.Id | Out-File -FilePath $pidFile -Encoding ascii
+
+# Asynchronously pipe server stdout and stderr to $logFile
+[System.Threading.Tasks.Task]::Run([System.Action]{
+    try {
+        $reader = $serverProc.StandardOutput
+        $writer = [System.IO.File]::AppendText($logFile)
+        while (-not $reader.EndOfStream) {
+            $line = $reader.ReadLine()
+            if ($null -ne $line) {
+                $writer.WriteLine($line)
+                $writer.Flush()
+            }
+        }
+    } catch {}
+}) | Out-Null
+
+[System.Threading.Tasks.Task]::Run([System.Action]{
+    try {
+        $reader = $serverProc.StandardError
+        $writer = [System.IO.File]::AppendText($logFile)
+        while (-not $reader.EndOfStream) {
+            $line = $reader.ReadLine()
+            if ($null -ne $line) {
+                $writer.WriteLine($line)
+                $writer.Flush()
+            }
+        }
+    } catch {}
+}) | Out-Null
 
 # --- 7. Poll for Server Readiness ---
 Write-Host "[*] Waiting for server and TLS engine initialization..." -NoNewline
@@ -289,7 +320,7 @@ Write-Host " [READY]  Time to ready: $([math]::Round($sw.ElapsedMilliseconds / 1
 Write-Host ""
 Write-Host " NETWORK ACCESS POINTS:" -ForegroundColor Yellow
 Write-Host "  * Web Application (HTTPS):     https://${selectedIp}:${Port}" -ForegroundColor Cyan
-Write-Host "  * Health Check Endpoint:       https://${selectedIp}:${Port}/healthz" -ForegroundColor White
+Write-Host "  * Health Readiness Endpoint:   https://${selectedIp}:${Port}/health/ready" -ForegroundColor White
 Write-Host "  * CA Certificate Onboarding:   http://${selectedIp}:${OnboardingPort}" -ForegroundColor Cyan
 Write-Host "  * CA Certificate Download:     http://${selectedIp}:${OnboardingPort}/ca.crt" -ForegroundColor White
 Write-Host "  * Embedded TURN Relay Server:  ${selectedIp}:${TurnPort} (UDP/TCP)" -ForegroundColor White
