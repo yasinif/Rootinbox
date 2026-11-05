@@ -1,7 +1,10 @@
 package http
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +15,15 @@ import (
 	"rootinbox/internal/usecase"
 	"rootinbox/pkg/crypto"
 )
+
+// hashIdentifier returns the first 16 hex characters of SHA-256 of the identifier for safe logging without PII leakage.
+func hashIdentifier(id string) string {
+	if id == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(h[:8])
+}
 
 // AuthHandler handles authentication HTTP endpoints.
 // RFC-0004: Authentication, Challenge-Response & Session Management.
@@ -43,16 +55,17 @@ const (
 // Request body: Raw 137-byte Registration Wire Format (RFC-0003 §5.1).
 func (h *AuthHandler) HandleRegister() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Read raw binary body.
-		body, err := io.ReadAll(io.LimitReader(r.Body, int64(crypto.RegistrationWireSize+1)))
-		if err != nil {
-			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
-			return
-		}
-
 		username := r.URL.Query().Get("username")
 		if username == "" {
 			username = r.Header.Get("X-Username")
+		}
+
+		// Read raw binary body.
+		body, err := io.ReadAll(io.LimitReader(r.Body, int64(crypto.RegistrationWireSize+1)))
+		if err != nil {
+			slog.Warn("register_failed", "reason", "AUTH_001_body_read", "username_hash", hashIdentifier(username))
+			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
+			return
 		}
 
 		displayName := r.URL.Query().Get("display_name")
@@ -76,7 +89,12 @@ func (h *AuthHandler) HandleRegister() http.HandlerFunc {
 
 		result, err := h.authUC.Register(ctx, body, username, displayName, authPubkey, kdfSalt)
 		if err != nil {
-			slog.Error("register error", "err", err)
+			reason := "register_error"
+			var de *domain.DomainError
+			if errors.As(err, &de) {
+				reason = string(de.Code)
+			}
+			slog.Warn("register_failed", "reason", reason, "username_hash", hashIdentifier(username))
 			WriteDomainError(w, err)
 			return
 		}
@@ -136,6 +154,7 @@ func (h *AuthHandler) HandleChallenge() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req challengeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Warn("login_failed", "reason", "AUTH_001_invalid_json", "username_hash", "")
 			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
 			return
 		}
@@ -147,6 +166,12 @@ func (h *AuthHandler) HandleChallenge() http.HandlerFunc {
 
 		result, err := h.authUC.Challenge(r.Context(), ident)
 		if err != nil {
+			reason := "challenge_error"
+			var de *domain.DomainError
+			if errors.As(err, &de) {
+				reason = string(de.Code)
+			}
+			slog.Warn("login_failed", "reason", reason, "username_hash", hashIdentifier(ident))
 			WriteDomainError(w, err)
 			return
 		}
@@ -182,13 +207,7 @@ func (h *AuthHandler) HandleVerify() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req verifyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
-			return
-		}
-
-		// Phase 12 / Task 0.5: session_signature and session_expires_at are MANDATORY.
-		// Missing either → AUTH_001 (never 400).
-		if req.SessionSignature == "" || req.SessionExpiresAt == nil {
+			slog.Warn("login_failed", "reason", "AUTH_001_invalid_json", "username_hash", "")
 			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
 			return
 		}
@@ -198,6 +217,14 @@ func (h *AuthHandler) HandleVerify() http.HandlerFunc {
 			ident = req.Username
 		}
 
+		// Phase 12 / Task 0.5: session_signature and session_expires_at are MANDATORY.
+		// Missing either → AUTH_001 (never 400).
+		if req.SessionSignature == "" || req.SessionExpiresAt == nil {
+			slog.Warn("login_failed", "reason", "AUTH_001_missing_session_sig", "username_hash", hashIdentifier(ident))
+			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
+			return
+		}
+
 		ua := r.Header.Get("User-Agent")
 		deviceLabel := ParseDeviceLabel(ua)
 		ctx := domain.WithDeviceLabel(r.Context(), deviceLabel)
@@ -205,7 +232,12 @@ func (h *AuthHandler) HandleVerify() http.HandlerFunc {
 		result, err := h.authUC.Verify(ctx, ident, req.ChallengeID,
 			req.SessionPublicKey, req.Signature, req.SessionSignature, *req.SessionExpiresAt)
 		if err != nil {
-			slog.Error("verify handler error", "err", err)
+			reason := "verify_failed"
+			var de *domain.DomainError
+			if errors.As(err, &de) {
+				reason = string(de.Code)
+			}
+			slog.Warn("login_failed", "reason", reason, "username_hash", hashIdentifier(ident))
 			WriteDomainError(w, err)
 			return
 		}

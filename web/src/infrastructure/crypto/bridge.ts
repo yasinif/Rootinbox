@@ -29,7 +29,7 @@ interface PendingCall {
   timer: ReturnType<typeof setTimeout>;
 }
 
-const WORKER_TIMEOUT_MS = 10_000; // RFC-0010 §12 F1
+const WORKER_TIMEOUT_MS = 30_000; // Increased to 30s for slow mobile devices (iOS 15.8 A9)
 
 export class CryptoWorkerBridge implements MediaCryptoPort {
   private worker: Worker;

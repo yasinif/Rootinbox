@@ -40,6 +40,10 @@ func ServeFrontend() http.Handler {
 		if cleanPath == "" {
 			cleanPath = "index.html"
 		}
+		if cleanPath == "device-check" || cleanPath == "device-check/" {
+			cleanPath = "device-check.html"
+			r.URL.Path = "/device-check.html"
+		}
 
 		const noStoreHeaders = "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"
 
@@ -57,7 +61,10 @@ func ServeFrontend() http.Handler {
 		if strings.HasSuffix(cleanPath, ".webmanifest") || cleanPath == "manifest.json" {
 			w.Header().Set("Content-Type", "application/manifest+json")
 			w.Header().Set("Cache-Control", noStoreHeaders)
-		} else if cleanPath == "index.html" || cleanPath == "sw.js" {
+		} else if cleanPath == "index.html" || cleanPath == "sw.js" || cleanPath == "device-check.html" {
+			if strings.HasSuffix(cleanPath, ".html") {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			}
 			w.Header().Set("Cache-Control", noStoreHeaders)
 		} else if cleanPath == "favicon.ico" {
 			w.Header().Set("Content-Type", "image/x-icon")

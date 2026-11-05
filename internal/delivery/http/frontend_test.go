@@ -54,6 +54,18 @@ func TestServeFrontend_PWAAssetsAndHeaders(t *testing.T) {
 			path:           "/api/v1/unknown",
 			expectedStatus: http.StatusNotFound,
 		},
+		{
+			name:               "device-check route served with HTML",
+			path:               "/device-check",
+			expectedStatus:     http.StatusOK,
+			expectedTypePrefix: "text/html",
+		},
+		{
+			name:               "device-check with trailing slash served with HTML",
+			path:               "/device-check/",
+			expectedStatus:     http.StatusOK,
+			expectedTypePrefix: "text/html",
+		},
 	}
 
 	for _, tc := range tests {

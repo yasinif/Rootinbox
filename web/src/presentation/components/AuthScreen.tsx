@@ -135,7 +135,7 @@ export function AuthScreen() {
         <div className="auth-logo-container">
           <div className="auth-logo">🔒</div>
           <h1 className="auth-title">RootInbox</h1>
-          <p className="auth-subtitle">Zero-Knowledge E2EE Messaging</p>
+          <p className="auth-subtitle">Private Messaging · Protected in Transit (HTTPS)</p>
         </div>
 
         <div className="auth-tabs">
@@ -262,8 +262,18 @@ export function AuthScreen() {
         <p className="auth-footer-text">
           {mode === 'login'
             ? 'Your credentials never leave this device. Keys are derived locally.'
-            : 'Telegram-style handles. All chats are end-to-end encrypted.'}
+            : 'Telegram-style handles. Protected in transit via HTTPS.'}
         </p>
+
+        <div style={{ textAlign: 'center', marginTop: 'var(--space-2)' }}>
+          <a
+            id="auth-device-check-link"
+            href="/device-check"
+            style={{ fontSize: 'var(--font-xs)', color: 'var(--color-accent)', textDecoration: 'none' }}
+          >
+            Diagnostics: Run Device Pre-Check
+          </a>
+        </div>
 
         {!isInstalled && (
           <div style={{ marginTop: 'var(--space-3)', borderTop: '1px solid var(--color-border)', paddingTop: 'var(--space-3)', textAlign: 'center' }}>

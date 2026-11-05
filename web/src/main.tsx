@@ -8,6 +8,14 @@
  * Presentation NEVER imports infrastructure (boundary lint = failure).
  * Use cases import domain ports only — concrete implementations injected here.
  */
+// Polyfill Object.hasOwn for older Safari/iOS (iOS 15.8 / Safari < 15.4)
+if (typeof Object.hasOwn !== 'function') {
+  Object.defineProperty(Object, 'hasOwn', {
+    value: (obj: object, prop: PropertyKey) => Object.prototype.hasOwnProperty.call(obj, prop),
+    configurable: true,
+    writable: true,
+  });
+}
 
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';

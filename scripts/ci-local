@@ -133,7 +133,7 @@ run_step "05-web-npm-ci" "web npm ci --ignore-scripts" \
 run_step "06-web-lint" "web npm run lint" 'cd web && npm run lint'
 
 # 7. web build
-run_step "07-web-build" "web npm run build" 'cd web && npm run build'
+run_step "07-web-build" "web npm run build and check-syntax" 'cd web && npm run build && npm run check-syntax'
 
 # 8. the seam grep
 run_step "08-seam-grep" "production dist test seams verification" \
