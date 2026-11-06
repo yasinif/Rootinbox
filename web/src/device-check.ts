@@ -1,4 +1,20 @@
+// Polyfill Object.hasOwn for older Safari/iOS (iOS 15.8 / Safari < 15.4)
+if (typeof Object.hasOwn !== 'function') {
+  Object.defineProperty(Object, 'hasOwn', {
+    value: (obj: object, prop: PropertyKey) => Object.prototype.hasOwnProperty.call(obj, prop),
+    configurable: true,
+    writable: true,
+  });
+}
+
 import { runCryptoProbes } from './device-check-crypto';
+
+declare global {
+  interface Window {
+    deviceCheckTimer?: ReturnType<typeof setTimeout>;
+    deviceCheckComplete?: boolean;
+  }
+}
 
 interface CheckResult {
   status: 'PASS' | 'FAIL' | 'UNKNOWN' | 'WARN';
@@ -293,6 +309,10 @@ async function runAdvancedCryptoChecks(): Promise<void> {
 async function runAll(): Promise<void> {
   await runBasicChecks();
   await runAdvancedCryptoChecks();
+  window.deviceCheckComplete = true;
+  if (window.deviceCheckTimer) {
+    clearTimeout(window.deviceCheckTimer);
+  }
 }
 
 function init(): void {

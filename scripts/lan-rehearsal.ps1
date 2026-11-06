@@ -11,6 +11,9 @@ param(
     [int]$TurnPort = 3478,
     [string]$DataDir = "scratch/lan_rehearsal",
     [string]$BinarySrc = "scratch/rootinbox_lan.exe",
+    [string]$UseBinary = "",
+    [switch]$InstallCa,
+    [switch]$RemoveCa,
     [switch]$Headless,
     [switch]$Stop,
     [switch]$CheckOnly,
@@ -25,6 +28,204 @@ function Write-Banner {
     Write-Host "`n================================================================================" -ForegroundColor Cyan
     Write-Host " $Text" -ForegroundColor Cyan
     Write-Host "================================================================================" -ForegroundColor Cyan
+}
+
+function Invoke-SelfCheck {
+    param(
+        [string]$TargetIp,
+        [int]$HttpsPort,
+        [string]$TlsDir
+    )
+    Write-Banner "RUNNING LAN REHEARSAL SELF-CHECK"
+    $allPassed = $true
+    $checks = @()
+
+    $curlCmd = Get-Command "curl.exe" -ErrorAction SilentlyContinue
+
+    function Get-HttpsUrl {
+        param([string]$Url)
+        if ($curlCmd) {
+            $raw = & curl.exe -k -s -i -m 6 $Url 2>&1
+            $text = [string]::Join("`n", $raw)
+            $parts = $text -split "(?:\r?\n){2}", 2
+            $hdr = if ($parts.Count -gt 0) { $parts[0] } else { "" }
+            $bdy = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+            return [PSCustomObject]@{ Headers = $hdr; Body = $bdy; Raw = $text }
+        } else {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+            $res = Invoke-WebRequest -Uri $Url -TimeoutSec 6 -UseBasicParsing -ErrorAction Stop
+            $ct = if ($res.Headers["Content-Type"]) { $res.Headers["Content-Type"] } else { "" }
+            return [PSCustomObject]@{ Headers = "Content-Type: $ct`nStatus: $($res.StatusCode)"; Body = $res.Content; Raw = $res.Content }
+        }
+    }
+
+    # 1. /health/ready check
+    $readyUrl = "https://${TargetIp}:${HttpsPort}/health/ready"
+    $checkReady = [PSCustomObject]@{ Name = "/health/ready is healthy JSON (not SPA shell)"; Status = "WAIT"; Hint = "" }
+    try {
+        $res = Get-HttpsUrl -Url $readyUrl
+        if ($res.Headers -match "200" -and ($res.Body -match '"status"\s*:\s*"pass"' -or $res.Body -match '"status"\s*:\s*"ok"') -and $res.Body -notmatch '<!DOCTYPE html>') {
+            $checkReady.Status = "PASS"
+        } else {
+            $checkReady.Status = "FAIL"
+            $checkReady.Hint = "Ready endpoint returned non-200 or HTML SPA fallback; check server log and DB_PATH"
+            $allPassed = $false
+        }
+    } catch {
+        $checkReady.Status = "FAIL"
+        $checkReady.Hint = "Could not connect to /health/ready: $($_.Exception.Message)"
+        $allPassed = $false
+    }
+    $checks += $checkReady
+
+    # 2. "/" contains real app markers
+    $rootUrl = "https://${TargetIp}:${HttpsPort}/"
+    $checkRoot = [PSCustomObject]@{ Name = "Root / contains real app markers"; Status = "WAIT"; Hint = "" }
+    $mainJsPath = ""
+    try {
+        $res = Get-HttpsUrl -Url $rootUrl
+        if ($res.Headers -match "200" -and ($res.Body -match 'id="root"' -or $res.Body -match 'id="auth-screen"' -or $res.Body -match 'id="app"') -and $res.Body -notmatch 'Waiting for Domain') {
+            $checkRoot.Status = "PASS"
+            if ($res.Body -match 'src="(/assets/main-[^"]+\.js)"') {
+                $mainJsPath = $matches[1]
+            } elseif ($res.Body -match 'src="(/assets/[^"]+\.js)"') {
+                $mainJsPath = $matches[1]
+            }
+        } else {
+            $checkRoot.Status = "FAIL"
+            $checkRoot.Hint = "HTML missing app markers or stuck in waiting-for-domain; check PUBLIC_HOST"
+            $allPassed = $false
+        }
+    } catch {
+        $checkRoot.Status = "FAIL"
+        $checkRoot.Hint = "Could not connect to /: $($_.Exception.Message)"
+        $allPassed = $false
+    }
+    $checks += $checkRoot
+
+    # 3. Main JS asset loads with JavaScript MIME type
+    $checkJs = [PSCustomObject]@{ Name = "Main JS asset loads with JavaScript MIME type"; Status = "WAIT"; Hint = "" }
+    if ($mainJsPath -ne "") {
+        try {
+            $jsUrl = "https://${TargetIp}:${HttpsPort}${mainJsPath}"
+            $res = Get-HttpsUrl -Url $jsUrl
+            if ($res.Headers -match "200" -and ($res.Headers -match "javascript" -or $res.Headers -match "application/javascript")) {
+                $checkJs.Status = "PASS"
+            } else {
+                $checkJs.Status = "FAIL"
+                $checkJs.Hint = "Asset returned non-200 or non-javascript Content-Type"
+                $allPassed = $false
+            }
+        } catch {
+            $checkJs.Status = "FAIL"
+            $checkJs.Hint = "Failed fetching $($mainJsPath): $($_.Exception.Message)"
+            $allPassed = $false
+        }
+    } else {
+        $checkJs.Status = "FAIL"
+        $checkJs.Hint = "Could not find main JS bundle path in root HTML"
+        $allPassed = $false
+    }
+    $checks += $checkJs
+
+    # 4. /device-check loads its script
+    $checkDc = [PSCustomObject]@{ Name = "/device-check loads its bundled module script"; Status = "WAIT"; Hint = "" }
+    try {
+        $dcUrl = "https://${TargetIp}:${HttpsPort}/device-check"
+        $res = Get-HttpsUrl -Url $dcUrl
+        $dcScriptPath = ""
+        if ($res.Body -match 'src="(/assets/deviceCheck-[^"]+\.js)"') {
+            $dcScriptPath = $matches[1]
+        } elseif ($res.Body -match 'src="(/assets/[^"]*deviceCheck[^"]*\.js)"') {
+            $dcScriptPath = $matches[1]
+        } elseif ($res.Body -match 'src="(/src/[^"]+)"') {
+            $checkDc.Status = "FAIL"
+            $checkDc.Hint = "Detected development script path '$($matches[1])'; bundled asset required"
+            $allPassed = $false
+        }
+
+        if ($checkDc.Status -ne "FAIL") {
+            if ($dcScriptPath -ne "") {
+                $sUrl = "https://${TargetIp}:${HttpsPort}${dcScriptPath}"
+                $sRes = Get-HttpsUrl -Url $sUrl
+                if ($sRes.Headers -match "200" -and ($sRes.Headers -match "javascript" -or $sRes.Headers -match "application/javascript")) {
+                    $checkDc.Status = "PASS"
+                } else {
+                    $checkDc.Status = "FAIL"
+                    $checkDc.Hint = "Script $dcScriptPath returned non-200 or non-javascript Content-Type"
+                    $allPassed = $false
+                }
+            } else {
+                $checkDc.Status = "FAIL"
+                $checkDc.Hint = "No bundled deviceCheck script reference found in /device-check HTML"
+                $allPassed = $false
+            }
+        }
+    } catch {
+        $checkDc.Status = "FAIL"
+        $checkDc.Hint = "Failed fetching /device-check: $($_.Exception.Message)"
+        $allPassed = $false
+    }
+    $checks += $checkDc
+
+    # 5. Headless browser verification if available
+    $nodeCmd = Get-Command "node" -ErrorAction SilentlyContinue
+    if ($null -ne $nodeCmd -and (Test-Path "node_modules/@playwright/test")) {
+        $checkBrowser = [PSCustomObject]@{ Name = "Headless browser DOM sanity check"; Status = "WAIT"; Hint = "" }
+        try {
+            $verifyScript = @"
+const { chromium } = require('@playwright/test');
+(async () => {
+  const browser = await chromium.launch({ headless: true, args: ['--ignore-certificate-errors'] });
+  const page = await browser.newPage();
+  await page.goto('$rootUrl', { waitUntil: 'domcontentloaded', timeout: 8000 });
+  const title = await page.title();
+  await browser.close();
+  if (title.includes('RootInbox')) process.exit(0);
+  process.exit(1);
+})().catch(() => process.exit(1));
+"@
+            $tempScript = [System.IO.Path]::GetTempFileName() + ".cjs"
+            [System.IO.File]::WriteAllText($tempScript, $verifyScript)
+            $p = Start-Process node -ArgumentList $tempScript -NoNewWindow -Wait -PassThru
+            Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+            if ($p.ExitCode -eq 0) {
+                $checkBrowser.Status = "PASS"
+            } else {
+                $checkBrowser.Status = "WARN"
+                $checkBrowser.Hint = "Headless browser did not verify app title"
+            }
+        } catch {
+            $checkBrowser.Status = "WARN"
+            $checkBrowser.Hint = "Playwright invocation error: $($_.Exception.Message)"
+        }
+        $checks += $checkBrowser
+    }
+
+    # Print results
+    Write-Host "`n SELF-CHECK RESULTS:" -ForegroundColor Yellow
+    foreach ($c in $checks) {
+        $color = switch ($c.Status) {
+            "PASS" { [System.ConsoleColor]::Green }
+            "FAIL" { [System.ConsoleColor]::Red }
+            "WARN" { [System.ConsoleColor]::Yellow }
+            default { [System.ConsoleColor]::DarkGray }
+        }
+        Write-Host "  [$($c.Status)] " -ForegroundColor $color -NoNewline
+        Write-Host "$($c.Name)" -ForegroundColor White
+        if ($c.Hint -ne "") {
+            Write-Host "         -> FIX HINT: $($c.Hint)" -ForegroundColor DarkYellow
+        }
+    }
+    Write-Host ""
+
+    if (-not $allPassed) {
+        Write-Host "[-] FATAL: Rehearsal self-check failed! One or more essential app shell components are broken." -ForegroundColor Red
+        return $false
+    }
+    Write-Host "[+] All essential rehearsal self-checks PASSED!" -ForegroundColor Green
+    return $true
 }
 
 function Get-LanCandidates {
@@ -106,6 +307,133 @@ if ($Stop) {
     return
 }
 
+# --- 1.1 Handle -InstallCa Switch ---
+if ($InstallCa) {
+    Write-Banner "RootInbox Windows CA Certificate Installer"
+    
+    # Locate CA cert
+    $caCertPath = Join-Path $DataDir "tls/ca.crt"
+    if (-not (Test-Path $caCertPath)) {
+        $altPath = "scratch/lan_rehearsal/tls/ca.crt"
+        if (Test-Path $altPath) {
+            $caCertPath = $altPath
+        } else {
+            Write-Host "[-] CA certificate not found at '$caCertPath'." -ForegroundColor Red
+            Write-Host "    Hint: Run .\scripts\lan-rehearsal.ps1 first to initialize the server and generate the CA certificate." -ForegroundColor Yellow
+            exit 1
+        }
+    }
+    $resolvedCaPath = (Resolve-Path $caCertPath).Path
+
+    # Check for elevation (Administrator)
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Host "[!] Administrator privileges are required to install a CA into the Trusted Root store." -ForegroundColor Yellow
+        $elevateChoice = Read-Host "Do you want to elevate and run the installation as Administrator? [Y/N] (default: Y)"
+        if ($elevateChoice -eq "" -or $elevateChoice -match '^(?i)y(es)?$') {
+            $argList = "-ExecutionPolicy Bypass -File `"$PSCommandPath`" -InstallCa -DataDir `"$DataDir`""
+            Start-Process powershell -Verb RunAs -ArgumentList $argList -Wait
+            return
+        } else {
+            Write-Host "[-] CA installation aborted by user (elevation declined)." -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    Write-Host "`n[WHY CHROME SAYS 'NOT SECURE']" -ForegroundColor Yellow
+    Write-Host "The Windows Certificate Import Wizard defaults to 'Automatically select the certificate store based on the type of certificate'." -ForegroundColor White
+    Write-Host "Windows then places the self-signed root into 'Intermediate Certification Authorities'." -ForegroundColor White
+    Write-Host "Chrome and Edge require root authorities to reside in 'Trusted Root Certification Authorities' (ROOT)." -ForegroundColor White
+    Write-Host "Because of this mismatch, Chrome rejects the CA and reports 'Not secure' (ERR_CERT_AUTHORITY_INVALID).`n" -ForegroundColor White
+    Write-Host "To do it manually in the Wizard, select: 'Place all certificates in the following store' -> Browse -> 'Trusted Root Certification Authorities'." -ForegroundColor Cyan
+    Write-Host "This script uses certutil to place it directly into the ROOT store.`n" -ForegroundColor Gray
+
+    # Explicit confirmation
+    $confirm = Read-Host "Install RootInbox Rehearsal CA ('$resolvedCaPath') into 'Trusted Root Certification Authorities'? [Y/N] (default: Y)"
+    if ($confirm -ne "" -and $confirm -notmatch '^(?i)y(es)?$') {
+        Write-Host "[-] CA installation cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "[*] Executing: certutil -addstore -f ROOT `"$resolvedCaPath`"" -ForegroundColor Cyan
+    $certutilOut = & certutil -addstore -f ROOT $resolvedCaPath
+    $certutilOut | Write-Host -ForegroundColor DarkGray
+
+    # Verification: check store afterwards
+    $caBytes = [System.IO.File]::ReadAllBytes($resolvedCaPath)
+    $x509 = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($caBytes)
+    $thumbprint = $x509.Thumbprint
+
+    $found = Get-ChildItem -Path Cert:\LocalMachine\Root | Where-Object { $_.Thumbprint -eq $thumbprint }
+    if ($found) {
+        Write-Host "`n[+] SUCCESS: RootInbox CA ($thumbprint) is verified in 'Trusted Root Certification Authorities'!" -ForegroundColor Green
+        Write-Host "    Chrome, Edge, and system WebKit will now trust HTTPS connections to your LAN rehearsal server." -ForegroundColor Green
+    } else {
+        Write-Host "`n[-] WARNING: certutil ran, but CA thumbprint was not found in Cert:\LocalMachine\Root." -ForegroundColor Red
+        exit 1
+    }
+    return
+}
+
+# --- 1.2 Handle -RemoveCa Switch ---
+if ($RemoveCa) {
+    Write-Banner "RootInbox Windows CA Certificate Remover"
+    
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Host "[!] Administrator privileges are required to remove a CA from the Trusted Root store." -ForegroundColor Yellow
+        $elevateChoice = Read-Host "Do you want to elevate and run CA removal as Administrator? [Y/N] (default: Y)"
+        if ($elevateChoice -eq "" -or $elevateChoice -match '^(?i)y(es)?$') {
+            $argList = "-ExecutionPolicy Bypass -File `"$PSCommandPath`" -RemoveCa -DataDir `"$DataDir`""
+            Start-Process powershell -Verb RunAs -ArgumentList $argList -Wait
+            return
+        } else {
+            Write-Host "[-] CA removal aborted by user (elevation declined)." -ForegroundColor Red
+            exit 1
+        }
+    }
+
+    # Search for RootInbox certificates in LocalMachine Root
+    $targets = Get-ChildItem -Path Cert:\LocalMachine\Root | Where-Object { $_.Subject -match "RootInbox" -or $_.Issuer -match "RootInbox" }
+    if (-not $targets -or $targets.Count -eq 0) {
+        $caCertPath = Join-Path $DataDir "tls/ca.crt"
+        if (Test-Path $caCertPath) {
+            $x509 = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new((Resolve-Path $caCertPath).Path)
+            $targets = Get-ChildItem -Path Cert:\LocalMachine\Root | Where-Object { $_.Thumbprint -eq $x509.Thumbprint }
+        }
+    }
+
+    if (-not $targets -or $targets.Count -eq 0) {
+        Write-Host "[i] No RootInbox CA certificates found in 'Trusted Root Certification Authorities'." -ForegroundColor Gray
+        return
+    }
+
+    Write-Host "Found $($targets.Count) RootInbox certificate(s) in Trusted Root store:" -ForegroundColor Yellow
+    foreach ($t in $targets) {
+        Write-Host "  * Thumbprint: $($t.Thumbprint) | Subject: $($t.Subject) | Expiry: $($t.NotAfter)" -ForegroundColor White
+    }
+
+    $confirm = Read-Host "`nAre you sure you want to remove these certificate(s) from Trusted Root store? [Y/N] (default: Y)"
+    if ($confirm -ne "" -and $confirm -notmatch '^(?i)y(es)?$') {
+        Write-Host "[-] Removal cancelled." -ForegroundColor Yellow
+        return
+    }
+
+    foreach ($t in $targets) {
+        Write-Host "[*] Removing thumbprint $($t.Thumbprint) via certutil..." -ForegroundColor Cyan
+        & certutil -delstore ROOT $t.Thumbprint | Out-Null
+    }
+
+    # Verify removal
+    $remaining = Get-ChildItem -Path Cert:\LocalMachine\Root | Where-Object { $_.Subject -match "RootInbox" }
+    if (-not $remaining) {
+        Write-Host "[+] SUCCESS: All RootInbox CA certificates have been removed from Trusted Root store." -ForegroundColor Green
+    } else {
+        Write-Host "[!] Some certificates could not be removed automatically." -ForegroundColor Yellow
+    }
+    return
+}
+
 # --- 2. IP Resolution ---
 $selectedIp = $LanIp
 if (-not $selectedIp) {
@@ -166,7 +494,14 @@ if ($CheckOnly) {
 }
 
 # --- 4. Build RootInbox Server Binary ---
-if ((-not (Test-Path $BinarySrc)) -or $ForceRebuild) {
+if ($UseBinary -ne "") {
+    if (-not (Test-Path $UseBinary)) {
+        Write-Host "[-] Specified binary not found at: '$UseBinary'" -ForegroundColor Red
+        exit 1
+    }
+    $BinarySrc = (Resolve-Path $UseBinary).Path
+    Write-Host "[+] Using prebuilt server binary: $BinarySrc (skipping Go and Node compilation)" -ForegroundColor Green
+} elseif ((-not (Test-Path $BinarySrc)) -or $ForceRebuild) {
     if ($NoBuild) {
         Write-Error "Binary not found at $BinarySrc and -NoBuild was requested."
         exit 1
@@ -205,8 +540,8 @@ Write-Host "[*] Launching RootInbox server on $selectedIp (HTTPS: $Port, Onboard
     $psi.WorkingDirectory = (Resolve-Path .).Path
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardOutput = $false
+    $psi.RedirectStandardError = $false
 
     $psi.EnvironmentVariables["SERVER_HOST"] = "0.0.0.0"
     $psi.EnvironmentVariables["PORT"] = "$Port"
@@ -225,6 +560,9 @@ Write-Host "[*] Launching RootInbox server on $selectedIp (HTTPS: $Port, Onboard
     $psi.EnvironmentVariables["IP_HASH_SECRET"] = $ipHashSecret
     $psi.EnvironmentVariables["PUSH_ENABLED"] = "false"
     $psi.EnvironmentVariables["INSECURE_DEV_MODE"] = "true"
+    $psi.EnvironmentVariables["REHEARSAL_MODE"] = "true"
+    $psi.EnvironmentVariables["REHEARSAL_DATA_DIR"] = (Resolve-Path $rehearsalDataDir).Path
+    $psi.EnvironmentVariables["REHEARSAL_LOG_FILE"] = Join-Path (Resolve-Path $DataDir).Path "rehearsal.log"
 
     $serverProc = [System.Diagnostics.Process]::Start($psi)
 
@@ -234,35 +572,6 @@ if ($null -eq $serverProc -or $serverProc.HasExited) {
 }
 
 $serverProc.Id | Out-File -FilePath $pidFile -Encoding ascii
-
-# Asynchronously pipe server stdout and stderr to $logFile
-[System.Threading.Tasks.Task]::Run([System.Action]{
-    try {
-        $reader = $serverProc.StandardOutput
-        $writer = [System.IO.File]::AppendText($logFile)
-        while (-not $reader.EndOfStream) {
-            $line = $reader.ReadLine()
-            if ($null -ne $line) {
-                $writer.WriteLine($line)
-                $writer.Flush()
-            }
-        }
-    } catch {}
-}) | Out-Null
-
-[System.Threading.Tasks.Task]::Run([System.Action]{
-    try {
-        $reader = $serverProc.StandardError
-        $writer = [System.IO.File]::AppendText($logFile)
-        while (-not $reader.EndOfStream) {
-            $line = $reader.ReadLine()
-            if ($null -ne $line) {
-                $writer.WriteLine($line)
-                $writer.Flush()
-            }
-        }
-    } catch {}
-}) | Out-Null
 
 # --- 7. Poll for Server Readiness ---
 Write-Host "[*] Waiting for server and TLS engine initialization..." -NoNewline
@@ -312,6 +621,15 @@ if (Test-Path $caCertPath) {
     } catch {}
 }
 
+# --- 8.5 Run LAN Rehearsal Self-Check ---
+$selfCheckOk = Invoke-SelfCheck -TargetIp $selectedIp -HttpsPort $Port -TlsDir $rehearsalTlsDir
+if (-not $selfCheckOk) {
+    Write-Host "[-] FATAL: Rehearsal self-check failed! Halting rehearsal server." -ForegroundColor Red
+    try { Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+    if (Test-Path $pidFile) { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
+    exit 1
+}
+
 # --- 9. Display Rehearsal Status Banner ---
 Write-Banner "ROOTINBOX LAN REHEARSAL IS READY!"
 
@@ -325,6 +643,7 @@ Write-Host "  * CA Certificate Onboarding:   http://${selectedIp}:${OnboardingPo
 Write-Host "  * CA Certificate Download:     http://${selectedIp}:${OnboardingPort}/ca.crt" -ForegroundColor White
 Write-Host "  * Embedded TURN Relay Server:  ${selectedIp}:${TurnPort} (UDP/TCP)" -ForegroundColor White
 Write-Host "  * CA SHA-256 Fingerprint:      $caHash" -ForegroundColor Magenta
+Write-Host "  * Rehearsal Access Log:        $(Join-Path (Resolve-Path $DataDir).Path "rehearsal.log")" -ForegroundColor White
 Write-Host ""
 Write-Host " --------------------------------------------------------------------------------" -ForegroundColor Gray
 Write-Host " WINDOWS FIREWALL REMINDER:" -ForegroundColor Yellow
