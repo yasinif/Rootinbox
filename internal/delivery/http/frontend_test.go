@@ -66,6 +66,23 @@ func TestServeFrontend_PWAAssetsAndHeaders(t *testing.T) {
 			expectedStatus:     http.StatusOK,
 			expectedTypePrefix: "text/html",
 		},
+		{
+			name:               "index.html served directly with 200 without redirect",
+			path:               "/index.html",
+			expectedStatus:     http.StatusOK,
+			expectedTypePrefix: "text/html",
+			expectedCache:      "no-cache",
+		},
+		{
+			name:           "missing JS asset under /assets/ returns 404 instead of SPA fallback",
+			path:           "/assets/nonexistent-bundle.js",
+			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "missing standalone .js returns 404",
+			path:           "/missing-script.js",
+			expectedStatus: http.StatusNotFound,
+		},
 	}
 
 	for _, tc := range tests {
