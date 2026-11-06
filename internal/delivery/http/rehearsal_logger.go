@@ -93,9 +93,11 @@ func RehearsalAccessLogger() func(http.Handler) http.Handler {
 			}
 
 			// Extract failure reason code if set by auth handlers
-			reason := rec.Header().Get("X-Auth-Reason")
-			// Strip the internal header so it is never exposed externally
-			rec.Header().Del("X-Auth-Reason")
+			reason := rec.authReason
+			if reason == "" {
+				reason = rec.Header().Get("X-Auth-Reason")
+				rec.Header().Del("X-Auth-Reason")
+			}
 
 			uaLabel := ParseDeviceLabel(r.UserAgent())
 			timestamp := time.Now().UTC().Format(time.RFC3339)
@@ -124,12 +126,26 @@ func RehearsalAccessLogger() func(http.Handler) http.Handler {
 
 type statusRecorder struct {
 	http.ResponseWriter
-	statusCode int
+	statusCode  int
+	authReason  string
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
-	r.statusCode = code
-	r.ResponseWriter.WriteHeader(code)
+	if !r.wroteHeader {
+		r.statusCode = code
+		r.authReason = r.Header().Get("X-Auth-Reason")
+		r.Header().Del("X-Auth-Reason")
+		r.wroteHeader = true
+		r.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(b)
 }
 
 func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
