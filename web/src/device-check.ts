@@ -9,6 +9,13 @@ if (typeof Object.hasOwn !== 'function') {
 
 import { runCryptoProbes } from './device-check-crypto';
 
+declare global {
+  interface Window {
+    deviceCheckTimer?: ReturnType<typeof setTimeout>;
+    deviceCheckComplete?: boolean;
+  }
+}
+
 interface CheckResult {
   status: 'PASS' | 'FAIL' | 'UNKNOWN' | 'WARN';
   detail: string;
@@ -302,9 +309,9 @@ async function runAdvancedCryptoChecks(): Promise<void> {
 async function runAll(): Promise<void> {
   await runBasicChecks();
   await runAdvancedCryptoChecks();
-  (window as any).deviceCheckComplete = true;
-  if ((window as any).deviceCheckTimer) {
-    clearTimeout((window as any).deviceCheckTimer);
+  window.deviceCheckComplete = true;
+  if (window.deviceCheckTimer) {
+    clearTimeout(window.deviceCheckTimer);
   }
 }
 
