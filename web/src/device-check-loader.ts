@@ -7,8 +7,8 @@
 
 declare global {
   interface Window {
-    __deviceCheckTimer?: ReturnType<typeof setTimeout>;
-    __deviceCheckComplete?: boolean;
+    deviceCheckTimer?: ReturnType<typeof setTimeout>;
+    deviceCheckComplete?: boolean;
   }
 }
 
@@ -80,7 +80,7 @@ window.addEventListener('error', (event) => {
 
 // 2. Global uncaught exception / rejection listener
 window.addEventListener('unhandledrejection', (event) => {
-  if (!window.__deviceCheckComplete) {
+  if (!window.deviceCheckComplete) {
     const reason = event.reason instanceof Error ? event.reason.message : String(event.reason || 'Unhandled rejection');
     // Log for debugging
     console.error('[DeviceCheck Loader] Unhandled rejection:', reason);
@@ -88,8 +88,8 @@ window.addEventListener('unhandledrejection', (event) => {
 });
 
 // 3. Fallback timeout: turn WAIT into FAIL if checks do not complete within 12 seconds
-window.__deviceCheckTimer = setTimeout(() => {
-  if (!window.__deviceCheckComplete) {
+window.deviceCheckTimer = setTimeout(() => {
+  if (!window.deviceCheckComplete) {
     failPendingChecks('مهلت اجرای ماژول‌های تشخیصی به پایان رسید (Timeout after 12s)');
   }
 }, 12000);

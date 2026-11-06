@@ -302,9 +302,9 @@ async function runAdvancedCryptoChecks(): Promise<void> {
 async function runAll(): Promise<void> {
   await runBasicChecks();
   await runAdvancedCryptoChecks();
-  window.__deviceCheckComplete = true;
-  if (window.__deviceCheckTimer) {
-    clearTimeout(window.__deviceCheckTimer);
+  (window as any).deviceCheckComplete = true;
+  if ((window as any).deviceCheckTimer) {
+    clearTimeout((window as any).deviceCheckTimer);
   }
 }
 
