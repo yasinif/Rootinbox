@@ -4,6 +4,7 @@ import React from 'react';
 import { UserProfileModal } from '../../src/presentation/components/user/UserProfileModal';
 import { ChatScreen } from '../../src/presentation/components/ChatScreen';
 import { AppContext } from '../../src/presentation/context';
+import { SW_CACHE_VERSION } from '../../src/domain/version';
 
 vi.mock('react-virtuoso', () => ({
   Virtuoso: ({ data, itemContent }: any) => (
@@ -145,7 +146,7 @@ describe('Web Push Notification Settings & Diagnostics Component Test', () => {
     expect(screen.getByText(/Notification Diagnostics/i)).toBeDefined();
     expect(screen.getByText(/Secure Context:/i)).toBeDefined();
     expect(screen.getByText(/Cache Version:/i)).toBeDefined();
-    expect(screen.getByText(/v6-cloud-attachment-push-20261019/i)).toBeDefined();
+    expect(screen.getByText(new RegExp(SW_CACHE_VERSION, 'i'))).toBeDefined();
   });
 
   it('toggles subscription on Enable/Disable Notifications click in UserProfileModal', async () => {

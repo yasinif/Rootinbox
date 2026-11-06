@@ -17,7 +17,7 @@ export default defineConfig({
         // Workbox will inject the precache manifest into the SW build.
         injectionPoint: 'self.__WB_MANIFEST',
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}'],
-        globIgnores: ['**/crypto.worker*'],
+        globIgnores: ['**/crypto.worker*', '**/device-check*'],
       },
       devOptions: {
         enabled: false, // SW disabled in dev; use npm run build to test.
