@@ -38,8 +38,8 @@ func ServeFrontend() http.Handler {
 		// Check if the file exists in the embedded FS.
 		cleanPath := strings.TrimPrefix(path, "/")
 		if cleanPath == "" || cleanPath == "index.html" {
-			cleanPath = "index.html"
-			r.URL.Path = "/"
+			http.Redirect(w, r, "./", http.StatusMovedPermanently)
+			return
 		}
 		if cleanPath == "device-check" || cleanPath == "device-check/" {
 			cleanPath = "device-check.html"
