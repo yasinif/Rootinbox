@@ -64,6 +64,7 @@ func (h *AuthHandler) HandleRegister() http.HandlerFunc {
 		body, err := io.ReadAll(io.LimitReader(r.Body, int64(crypto.RegistrationWireSize+1)))
 		if err != nil {
 			slog.Warn("register_failed", "reason", "AUTH_001_body_read", "username_hash", hashIdentifier(username))
+			w.Header().Set("X-Auth-Reason", "AUTH_001_body_read")
 			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
 			return
 		}
@@ -95,6 +96,7 @@ func (h *AuthHandler) HandleRegister() http.HandlerFunc {
 				reason = string(de.Code)
 			}
 			slog.Warn("register_failed", "reason", reason, "username_hash", hashIdentifier(username))
+			w.Header().Set("X-Auth-Reason", reason)
 			WriteDomainError(w, err)
 			return
 		}
@@ -155,6 +157,7 @@ func (h *AuthHandler) HandleChallenge() http.HandlerFunc {
 		var req challengeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			slog.Warn("login_failed", "reason", "AUTH_001_invalid_json", "username_hash", "")
+			w.Header().Set("X-Auth-Reason", "AUTH_001_invalid_json")
 			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
 			return
 		}
@@ -172,6 +175,7 @@ func (h *AuthHandler) HandleChallenge() http.HandlerFunc {
 				reason = string(de.Code)
 			}
 			slog.Warn("login_failed", "reason", reason, "username_hash", hashIdentifier(ident))
+			w.Header().Set("X-Auth-Reason", reason)
 			WriteDomainError(w, err)
 			return
 		}
@@ -208,6 +212,7 @@ func (h *AuthHandler) HandleVerify() http.HandlerFunc {
 		var req verifyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			slog.Warn("login_failed", "reason", "AUTH_001_invalid_json", "username_hash", "")
+			w.Header().Set("X-Auth-Reason", "AUTH_001_invalid_json")
 			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
 			return
 		}
@@ -221,6 +226,7 @@ func (h *AuthHandler) HandleVerify() http.HandlerFunc {
 		// Missing either → AUTH_001 (never 400).
 		if req.SessionSignature == "" || req.SessionExpiresAt == nil {
 			slog.Warn("login_failed", "reason", "AUTH_001_missing_session_sig", "username_hash", hashIdentifier(ident))
+			w.Header().Set("X-Auth-Reason", "AUTH_001_missing_session_sig")
 			WriteError(w, http.StatusUnauthorized, "AUTH_001", authFailMessage)
 			return
 		}
@@ -238,6 +244,7 @@ func (h *AuthHandler) HandleVerify() http.HandlerFunc {
 				reason = string(de.Code)
 			}
 			slog.Warn("login_failed", "reason", reason, "username_hash", hashIdentifier(ident))
+			w.Header().Set("X-Auth-Reason", reason)
 			WriteDomainError(w, err)
 			return
 		}

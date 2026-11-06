@@ -411,6 +411,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	handler = middleware.TraceID()(handler)
 
 	// Logger and Panic Recovery
+	handler = RehearsalAccessLogger()(handler)
 	handler = middleware.RequestLogger(deps.Logger)(handler)
 	handler = middleware.PanicRecovery(deps.Logger)(handler)
 

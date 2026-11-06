@@ -76,6 +76,19 @@ Assert-Test -Description "lan-rehearsal full lifecycle (Start -> Check -> Stop)"
         # 2. Run verification probe
         & "scripts/lan-rehearsal-check.ps1" -LanIp "127.0.0.1" -Port $testPort -OnboardingPort $testOnboarding -TurnPort $testTurn
 
+        # 2.5 Verify Rehearsal Access Log format & confidentiality
+        $rehearsalLog = Join-Path $testDir "rehearsal.log"
+        if (-not (Test-Path $rehearsalLog)) {
+            throw "rehearsal.log was not created at $rehearsalLog"
+        }
+        $logContent = Get-Content $rehearsalLog -Raw
+        if ($logContent -notmatch "GET /health/ready" -and $logContent -notmatch "GET /") {
+            throw "rehearsal.log does not contain expected HTTP request entries"
+        }
+        if ($logContent -match "password" -or $logContent -match "turnSecret" -or $logContent -match "lan_rehearsal_iphash") {
+            throw "rehearsal.log leaked confidential secrets or credentials!"
+        }
+
         # 3. Stop server
         & "scripts/lan-rehearsal.ps1" -DataDir $testDir -Stop
 
@@ -90,6 +103,16 @@ Assert-Test -Description "lan-rehearsal full lifecycle (Start -> Check -> Stop)"
         }
     } finally {
         Remove-Item -Recurse -Force $testDir -ErrorAction SilentlyContinue
+    }
+}
+
+# ------------------------------------------------------------------------------
+# Test 4: -UseBinary Rejects Non-Existent Path
+# ------------------------------------------------------------------------------
+Assert-Test -Description "lan-rehearsal.ps1 -UseBinary rejects non-existent binary" -Test {
+    $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-ExecutionPolicy Bypass -File scripts/lan-rehearsal.ps1 -UseBinary nonexistent_rootinbox.exe -Headless" -Wait -PassThru -NoNewWindow
+    if ($proc.ExitCode -eq 0) {
+        throw "Expected non-zero exit code when -UseBinary points to missing file, got 0"
     }
 }
 
