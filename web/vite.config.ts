@@ -17,12 +17,45 @@ export default defineConfig({
         // Workbox will inject the precache manifest into the SW build.
         injectionPoint: 'self.__WB_MANIFEST',
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webmanifest}'],
-        globIgnores: ['**/crypto.worker*'],
+        globIgnores: ['**/crypto.worker*', '**/device-check*'],
       },
       devOptions: {
         enabled: false, // SW disabled in dev; use npm run build to test.
       },
     }),
+    {
+      name: 'inject-device-check-loader',
+      transformIndexHtml: {
+        order: 'post',
+        handler(html, ctx) {
+          if (!ctx.filename.endsWith('device-check.html')) return html;
+          let loaderPath = '';
+          if (ctx.bundle) {
+            for (const [key, item] of Object.entries(ctx.bundle)) {
+              if (item.name === 'deviceCheckLoader' || key.includes('deviceCheckLoader')) {
+                loaderPath = `/${item.fileName}`;
+                break;
+              }
+            }
+          } else {
+            loaderPath = '/src/device-check-loader.ts';
+          }
+          if (loaderPath) {
+            return {
+              html,
+              tags: [
+                {
+                  tag: 'script',
+                  attrs: { type: 'module', crossorigin: '', src: loaderPath },
+                  injectTo: 'head-prepend',
+                },
+              ],
+            };
+          }
+          return html;
+        },
+      },
+    },
   ],
   resolve: {
     alias: {
@@ -61,6 +94,7 @@ export default defineConfig({
       input: {
         main: `${import.meta.dirname}/index.html`,
         deviceCheck: `${import.meta.dirname}/device-check.html`,
+        deviceCheckLoader: `${import.meta.dirname}/src/device-check-loader.ts`,
       },
     },
   },

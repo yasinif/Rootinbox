@@ -593,6 +593,120 @@ jobs:
           chmod +x scripts/isolation-drill
           ./scripts/isolation-drill "$PWD/dist/rootinbox-linux-amd64"
 
+  production-load:
+    name: Production App Load & HTTPS Gate (Real Browsers)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+          cache-dependency-path: 'go.sum'
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Build web application (production dist)
+        working-directory: web
+        run: |
+          npm ci --ignore-scripts
+          node -e "require('fs').writeFileSync('node_modules/go.mod', 'module ignored\n')"
+          npm run build
+
+      - name: Build Go binary with embedded production dist
+        run: |
+          go build -o /tmp/rootinbox-prod ./cmd/rootinbox
+
+      - name: Launch Go server in HTTPS Self-Signed Mode
+        run: |
+          mkdir -p /tmp/prod-data /tmp/prod-tls /tmp/prod-media
+          RAND_SECRET=$(head -c 32 /dev/urandom | base64)
+          SERVER_HOST=0.0.0.0 \
+          PORT=8443 \
+          PUBLIC_HOST=127.0.0.1 \
+          TLS_MODE=selfsigned \
+          TLS_DATA_DIR=/tmp/prod-tls \
+          TLS_ONBOARDING_PORT=8080 \
+          DB_PATH=/tmp/prod-data/app.db \
+          MEDIA_PATH=/tmp/prod-media \
+          LOG_LEVEL=info \
+          ALLOW_SELF_REGISTRATION=true \
+          PUSH_ENABLED=false \
+          INSECURE_DEV_MODE=true \
+          IP_HASH_SECRET="$RAND_SECRET" \
+          /tmp/rootinbox-prod > /tmp/rootinbox-prod.log 2>&1 &
+          SERVER_PID=$!
+          echo "SERVER_PID=$SERVER_PID" >> $GITHUB_ENV
+
+          READY=0
+          for i in $(seq 1 60); do
+            if curl -k -s https://127.0.0.1:8443/health/ready >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "[-] Go server process terminated unexpectedly!" >&2
+              cat /tmp/rootinbox-prod.log >&2
+              exit 1
+            fi
+            sleep 0.2
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "[-] Timeout waiting for server readiness on https://127.0.0.1:8443" >&2
+            cat /tmp/rootinbox-prod.log >&2
+            exit 1
+          fi
+          echo "[+] Go server is ready on https://127.0.0.1:8443"
+
+      - name: Cache Playwright Browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
+      - name: Install Playwright browsers and dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: web
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: web
+        run: npx playwright install-deps chromium webkit
+
+      - name: Run Production Load & Upgrade Suite (Desktop Chrome, Pixel 7, iPhone 14 WebKit)
+        working-directory: web
+        env:
+          PLAYWRIGHT_BASE_URL: https://127.0.0.1:8443
+        run: |
+          mkdir -p test-results
+          npx playwright test tests/e2e/production-load-and-upgrade.spec.ts --project=desktop-chrome --project=pixel-7 --project=iphone-14
+
+      - name: Dump server logs on failure
+        if: failure()
+        run: cat /tmp/rootinbox-prod.log || true
+
+      - name: Upload test results on failure
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        continue-on-error: true
+        with:
+          name: playwright-prod-artifacts
+          path: web/test-results/
+          retention-days: 3
+          if-no-files-found: ignore
+
   gate:
     name: CI Gate
     runs-on: ubuntu-24.04
@@ -609,6 +723,7 @@ jobs:
       - tls-proof
       - relocation
       - isolation-drill
+      - production-load
     steps:
       - name: CI Gate Evaluation
         env:
@@ -623,6 +738,7 @@ jobs:
           TLS_PROOF_RESULT: ${{ needs.tls-proof.result }}
           RELOCATION_RESULT: ${{ needs.relocation.result }}
           ISOLATION_DRILL_RESULT: ${{ needs.isolation-drill.result }}
+          PRODUCTION_LOAD_RESULT: ${{ needs.production-load.result }}
         run: |
           echo "=================================================="
           echo "CI Gate Aggregation Check"
@@ -638,6 +754,7 @@ jobs:
           echo "tls-proof:        $TLS_PROOF_RESULT"
           echo "relocation:       $RELOCATION_RESULT"
           echo "isolation-drill:  $ISOLATION_DRILL_RESULT"
+          echo "production-load:  $PRODUCTION_LOAD_RESULT"
           echo "=================================================="
 
           FAILED=0
@@ -666,6 +783,7 @@ jobs:
           check_job "tls-proof" "$TLS_PROOF_RESULT"
           check_job "relocation" "$RELOCATION_RESULT"
           check_job "isolation-drill" "$ISOLATION_DRILL_RESULT"
+          check_job "production-load" "$PRODUCTION_LOAD_RESULT"
 
           # vapid-migration is required to succeed on pull_request; on push to main it is intentionally skipped.
           if [ "$EVENT_NAME" = "pull_request" ]; then
