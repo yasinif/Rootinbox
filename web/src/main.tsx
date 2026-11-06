@@ -444,7 +444,6 @@ if (import.meta.env.VITE_E2E === 'true' && typeof window !== 'undefined') {
 
 // Register Service Worker for PWA installation & push notifications (RFC-0010 §6)
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
-  const hadController = Boolean(navigator.serviceWorker.controller);
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).then((reg) => {
       void reg.update();
@@ -454,9 +453,6 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
 
     let refreshing = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
-      // First install: this page was loaded fresh from server, do not reload
-      if (!hadController) return;
-
       // Loop protection: only abort if more than 3 consecutive controller reloads happen rapidly
       const count = Number(sessionStorage.getItem('sw_reload_guard') || '0');
       if (count >= 3) {
