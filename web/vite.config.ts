@@ -60,7 +60,6 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: `${import.meta.dirname}/index.html`,
-        deviceCheck: `${import.meta.dirname}/device-check.html`,
       },
     },
   },
