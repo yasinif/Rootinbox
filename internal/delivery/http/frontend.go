@@ -37,8 +37,9 @@ func ServeFrontend() http.Handler {
 
 		// Check if the file exists in the embedded FS.
 		cleanPath := strings.TrimPrefix(path, "/")
-		if cleanPath == "" {
+		if cleanPath == "" || cleanPath == "index.html" {
 			cleanPath = "index.html"
+			r.URL.Path = "/"
 		}
 		if cleanPath == "device-check" || cleanPath == "device-check/" {
 			cleanPath = "device-check.html"
@@ -49,8 +50,16 @@ func ServeFrontend() http.Handler {
 
 		_, err := fs.Stat(distFS, cleanPath)
 		if err != nil {
+			// Asset requests (under /assets/ or ending in .js/.css/.map) MUST NOT hit SPA fallback.
+			// Returning 200 text/html for missing scripts causes MIME type failure in browsers.
+			if strings.HasPrefix(cleanPath, "assets/") || strings.HasSuffix(cleanPath, ".js") || strings.HasSuffix(cleanPath, ".css") || strings.HasSuffix(cleanPath, ".map") {
+				http.NotFound(w, r)
+				return
+			}
+
 			// SPA fallback: serve index.html for client-side routing.
 			// index.html MUST NOT be cached (§7.2 — version detection relies on fresh loads).
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", noStoreHeaders)
 			r.URL.Path = "/"
 			fileServer.ServeHTTP(w, r)

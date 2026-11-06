@@ -13,6 +13,7 @@ export default defineConfig({
   use: {
     baseURL,
     trace: 'retain-on-failure',
+    ignoreHTTPSErrors: true,
   },
   projects: [
     {
@@ -23,6 +24,7 @@ export default defineConfig({
         launchOptions: {
           args: [
             ...(process.env.SPKI_PIN ? [`--ignore-certificate-errors-spki-list=${process.env.SPKI_PIN}`] : []),
+            '--ignore-certificate-errors',
             '--use-fake-ui-for-media-stream',
             '--use-fake-device-for-media-stream',
             '--auto-select-desktop-capture-source=Entire screen',
@@ -37,6 +39,7 @@ export default defineConfig({
         launchOptions: {
           args: [
             ...(process.env.SPKI_PIN ? [`--ignore-certificate-errors-spki-list=${process.env.SPKI_PIN}`] : []),
+            '--ignore-certificate-errors',
             '--use-fake-ui-for-media-stream',
             '--use-fake-device-for-media-stream',
           ],

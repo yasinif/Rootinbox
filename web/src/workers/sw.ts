@@ -36,8 +36,9 @@ registerRoute(
 );
 
 // HTML navigation requests: NetworkFirst to guarantee fresh index.html
+// Exclude /device-check so diagnostics run directly against the server without SW interference.
 registerRoute(
-  ({ request }) => request.mode === 'navigate',
+  ({ request, url }) => request.mode === 'navigate' && !url.pathname.startsWith('/device-check'),
   new NetworkFirst({
     cacheName: `rootinbox-nav-${SW_CACHE_VERSION}`,
   }),
